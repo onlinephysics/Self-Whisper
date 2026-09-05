@@ -1,0 +1,13 @@
+@echo off
+set PYTHONIOENCODING=utf-8
+title Self-Whisper Speech to Text (DEBUG console)
+echo ============================================================
+echo Self-Whisper DEBUG mode - console stays open for troubleshooting.
+echo All output is also available in Settings -^> Logs.
+echo ============================================================
+python main.py
+if errorlevel 1 (
+    echo.
+    echo Self-Whisper exited with an error.
+    pause
+)

@@ -1,0 +1,572 @@
+"""
+Self-Whisper: Real-Time Windows Speech-to-Text via Gemini Live API
+Main Application Orchestrator
+
+Connects:
+- Audio Capture Engine (sounddevice 16kHz PCM)
+- Gemini Live Streaming Client & Fallback (Google AI Studio)
+- Text Injector (Smart Clipboard paste into WhatsApp/Discord/Office)
+- Global Hotkey Manager (Toggle & Push-to-Talk)
+- Floating HUD & System Tray UI
+"""
+
+import sys
+import os
+import threading
+import time
+from typing import Optional
+
+from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtWidgets import QApplication, QMessageBox
+
+from config import config
+from log_store import install as install_log_store, log, log_dictation
+from audio_capture import AudioCaptureEngine
+from gemini_live import GeminiLiveSession, GeminiTranscribeFallback
+from text_injector import injector
+from hotkey_manager import GlobalHotkeyManager
+from ui.floating_hud import FloatingHUD
+from ui.settings_dialog import SettingsDialog
+from ui.tray_icon import SelfWhisperTray
+from sound_effects import play_start_sound, play_stop_sound, play_success_sound, play_error_sound
+
+
+class AppSignals(QObject):
+    """Thread-safe signal bridge between background workers and Qt GUI."""
+    status_changed = pyqtSignal(str, str)     # (status, message)
+    audio_level_updated = pyqtSignal(float)   # 0.0 - 1.0
+    preview_updated = pyqtSignal(str)         # live transcript text
+    inject_requested = pyqtSignal(str)        # final text to inject
+    request_settings = pyqtSignal()           # open settings dialog
+    # Hotkey thread -> GUI thread marshalling (pyqtSignal.emit is thread-safe,
+    # direct method calls from pynput listener thread are NOT safe for Qt UI).
+    toggle_requested = pyqtSignal()
+    push_start_requested = pyqtSignal()
+    push_stop_requested = pyqtSignal()
+
+
+class SelfWhisperApp:
+    def __init__(self, qapp: QApplication):
+        self.qapp = qapp
+        self.signals = AppSignals()
+
+        # State tracking
+        self.is_recording = False
+        self._turn_finalized = True
+        self.active_session: Optional[GeminiLiveSession] = None
+        self.accumulated_pcm = bytearray()
+        self.stream_thread: Optional[threading.Thread] = None
+        self._stop_stream_flag = False
+        self.target_hwnd: Optional[int] = None
+        self.last_external_hwnd: Optional[int] = None
+        # Debounce for toggle (hotkey auto-repeat / double-fire guard).
+        # Without this, one physical press can fire toggle twice (start->stop),
+        # which looks like "need to press 2 times".
+        self._last_toggle_time = 0.0
+        self._toggle_debounce_s = 0.6
+        # Tracks whether the current recording was started by holding the
+        # push-to-talk key. PTT release only stops a PTT-owned session, so
+        # releasing PTT can never kill a toggle-started dictation.
+        self._ptt_owner = False
+
+        # Continuous background focus tracker: always remembers target application
+        self.focus_poll_timer = QTimer()
+        self.focus_poll_timer.timeout.connect(self._track_foreground_window)
+        self.focus_poll_timer.start(100)
+
+        # Initialize UI Components
+        saved_x = config.get("hud_x")
+        saved_y = config.get("hud_y")
+        self.hud = FloatingHUD(initial_x=saved_x, initial_y=saved_y)
+        self.hud.update_language_badge(config.get("language_mode", "bn_primary"))
+
+        self.tray = SelfWhisperTray()
+        self.tray.show()
+
+        self.settings_dialog: Optional[SettingsDialog] = None
+
+        # Initialize Audio Capture
+        dev_idx = config.get("input_device_index")
+        self.audio_engine = AudioCaptureEngine(
+            sample_rate=config.get("sample_rate", 16000),
+            chunk_ms=config.get("chunk_duration_ms", 100),
+            device_index=dev_idx,
+            level_callback=self._on_audio_level,
+        )
+
+        # Initialize Text Injector
+        injector.set_mode(config.get("injection_mode", "typewriter"))
+
+        # Initialize Hotkey Manager
+        # NOTE: callbacks only emit thread-safe Qt signals. The actual
+        # start/stop/toggle logic always runs on the GUI thread.
+        self.hotkey_mgr = GlobalHotkeyManager(
+            toggle_hotkey=config.get("hotkey_toggle", "<ctrl>+<shift>+<space>"),
+            push_to_talk_key=config.get("hotkey_push_to_talk", "<f8>"),
+            mode=config.get("hotkey_mode", "toggle"),
+            on_toggle_callback=lambda: self.signals.toggle_requested.emit(),
+            on_push_start_callback=lambda: self.signals.push_start_requested.emit(),
+            on_push_stop_callback=lambda: self.signals.push_stop_requested.emit(),
+        )
+
+        self._connect_signals()
+        self.hotkey_mgr.start()
+
+        # Respect Auto-Hide setting on launch
+        if config.get("auto_hide_hud", False):
+            self.hud.hide()
+        else:
+            self.hud.show()
+
+    def _track_foreground_window(self):
+        """Continuously records the active window so typing always reaches the right app."""
+        try:
+            import ctypes
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            if not fg:
+                return
+            hud_hwnd = int(self.hud.winId()) if self.hud else 0
+            settings_hwnd = int(self.settings_dialog.winId()) if (self.settings_dialog and self.settings_dialog.isVisible()) else 0
+            if fg != hud_hwnd and fg != settings_hwnd:
+                self.last_external_hwnd = fg
+        except Exception:
+            pass
+
+    def _connect_signals(self):
+        # Bridge signals to UI slots. Connected EXACTLY ONCE here.
+        # (Previously HUD/tray connections lived inside _on_preview_updated,
+        # so every transcript delta added another connection -> N clicks fired
+        # N times. Even N = net no-op, which made the mouse button look dead.)
+        self.signals.status_changed.connect(self.hud.set_status)
+        self.signals.audio_level_updated.connect(self.hud.update_audio_level)
+        self.signals.preview_updated.connect(self._on_preview_updated)
+        self.signals.inject_requested.connect(self._handle_injection)
+        self.signals.request_settings.connect(self.open_settings)
+        # Hotkey marshalling: listener thread -> GUI thread.
+        # Both shortcuts are always active: toggle chord flips state,
+        # PTT key records while held (and only stops its own session).
+        self.signals.toggle_requested.connect(self.toggle_recording)
+        self.signals.push_start_requested.connect(self._on_push_start)
+        self.signals.push_stop_requested.connect(self._on_push_stop)
+
+        # HUD button events (connect once)
+        try:
+            self.hud.toggle_clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            self.hud.settings_clicked.disconnect()
+        except Exception:
+            pass
+        try:
+            self.hud.language_cycle_clicked.disconnect()
+        except Exception:
+            pass
+        self.hud.toggle_clicked.connect(self.toggle_recording)
+        self.hud.settings_clicked.connect(self.open_settings)
+        self.hud.language_cycle_clicked.connect(self._cycle_language)
+
+        # Tray actions (connect once)
+        try:
+            self.tray.toggle_requested.disconnect()
+        except Exception:
+            pass
+        try:
+            self.tray.toggle_hud_requested.disconnect()
+        except Exception:
+            pass
+        try:
+            self.tray.settings_requested.disconnect()
+        except Exception:
+            pass
+        try:
+            self.tray.language_changed.disconnect()
+        except Exception:
+            pass
+        try:
+            self.tray.exit_requested.disconnect()
+        except Exception:
+            pass
+        self.tray.toggle_requested.connect(self.toggle_recording)
+        self.tray.toggle_hud_requested.connect(self._toggle_hud_visibility)
+        self.tray.settings_requested.connect(self.open_settings)
+        self.tray.language_changed.connect(self._set_language)
+        self.tray.exit_requested.connect(self.exit_app)
+
+    def _on_preview_updated(self, text: str):
+        """Updates HUD and types live in the active application's textbox as you speak."""
+        self.hud.set_preview_text(text)
+        if self.is_recording:
+            injector.stream_update(text, target_hwnd=self.target_hwnd)
+
+    def _on_audio_level(self, level: float):
+        self.signals.audio_level_updated.emit(level)
+
+    def _toggle_hud_visibility(self):
+        if self.hud.isVisible():
+            self.hud.hide()
+        else:
+            self.hud.show()
+
+    def _cycle_language(self):
+        current = config.get("language_mode", "bn_primary")
+        cycle_order = ["bn_primary", "bn_only", "en_only", "auto"]
+        try:
+            next_idx = (cycle_order.index(current) + 1) % len(cycle_order)
+            new_mode = cycle_order[next_idx]
+        except ValueError:
+            new_mode = "bn_primary"
+
+        self._set_language(new_mode)
+
+    def _set_language(self, lang_mode: str):
+        config.set("language_mode", lang_mode, auto_save=True)
+        self.hud.update_language_badge(lang_mode)
+        # Push live into the active session so the change takes effect
+        # immediately without requiring a restart.
+        try:
+            if self.active_session is not None:
+                self.active_session.set_language_mode(lang_mode)
+        except Exception:
+            pass
+        mode_names = {
+            "bn_primary": "Bangla (Primary) + English",
+            "bn_only": "Bangla Only",
+            "en_only": "English Only",
+            "auto": "Auto Detect",
+        }
+        self.hud.set_status("idle", f"Language: {mode_names.get(lang_mode, lang_mode)}")
+
+    def toggle_recording(self):
+        """Toggles between listening and transcribing (debounced, GUI thread only)."""
+        now = time.monotonic()
+        if now - self._last_toggle_time < self._toggle_debounce_s:
+            return
+        self._last_toggle_time = now
+        # Manual toggle takes over: a pending PTT hold no longer owns the session.
+        self._ptt_owner = False
+        if self.is_recording:
+            self.stop_recording()
+        else:
+            self.start_recording()
+
+    def _on_push_start(self):
+        """Hold-to-talk pressed: start only if idle, and claim ownership."""
+        if self.is_recording:
+            self._ptt_owner = False
+            return
+        self._ptt_owner = True
+        self.start_recording()
+
+    def _on_push_stop(self):
+        """Hold-to-talk released: stop only the PTT-owned session."""
+        owned = self._ptt_owner
+        self._ptt_owner = False
+        if owned and self.is_recording:
+            self.stop_recording()
+
+    def start_recording(self):
+        """Initiates microphone capture and real-time streaming."""
+        if self.is_recording:
+            return
+
+        api_key = config.get("api_key", "").strip()
+        if not api_key:
+            if config.get("sound_effects_enabled", True):
+                play_error_sound()
+            self.signals.status_changed.emit("error", "API Key Missing! Set in Settings.")
+            self.signals.request_settings.emit()
+            return
+
+        # Start audio recording first
+        started = self.audio_engine.start()
+        if not started:
+            if config.get("sound_effects_enabled", True):
+                play_error_sound()
+            self.signals.status_changed.emit("error", "Microphone access error! Check Settings.")
+            self.tray.set_recording_state(False)
+            return
+
+        self.is_recording = True
+        self.accumulated_pcm = bytearray()
+        self._stop_stream_flag = False
+
+        # Capture current active foreground window so text is injected into it
+        try:
+            import ctypes
+            fg = ctypes.windll.user32.GetForegroundWindow()
+            hud_hwnd = int(self.hud.winId()) if self.hud else 0
+            settings_hwnd = int(self.settings_dialog.winId()) if (self.settings_dialog and self.settings_dialog.isVisible()) else 0
+            if fg and fg != hud_hwnd and fg != settings_hwnd:
+                self.target_hwnd = fg
+            elif self.last_external_hwnd and ctypes.windll.user32.IsWindow(self.last_external_hwnd):
+                self.target_hwnd = self.last_external_hwnd
+
+            if self.target_hwnd:
+                print(f"[SelfWhisper] Target window captured: {hex(self.target_hwnd)}")
+        except Exception:
+            pass
+
+        # Prepare live stream session in injector for real-time in-place typing
+        self._turn_finalized = False
+        injector.start_live_session(target_hwnd=self.target_hwnd)
+
+        # Visual feedback: update HUD and ensure it's visible on screen
+        self.hud.show()
+        self.signals.status_changed.emit("listening", "Listening... Speak now")
+        self.tray.set_recording_state(True)
+
+        # Audio chime feedback: instant audible cue that recording has started
+        if config.get("sound_effects_enabled", True):
+            play_start_sound()
+
+        # Ensure Live WebSocket session is connected
+        self._ensure_live_session()
+
+        # Start background streaming worker
+        self.stream_thread = threading.Thread(target=self._stream_pipeline, daemon=True)
+        self.stream_thread.start()
+
+    def _ensure_live_session(self):
+        """Maintains persistent WebSocket session with Gemini Live."""
+        api_key = config.get("api_key", "").strip()
+        model = config.get("model", "gemini-3.5-transcribe-live")
+        fallback_model = config.get("fallback_model", "gemini-2.0-flash")
+        corr_level = config.get("correction_level", "high")
+        lang_mode = config.get("language_mode", "bn_primary")
+
+        if self.active_session is None or not self.active_session._is_connected:
+            self.active_session = GeminiLiveSession(
+                api_key=api_key,
+                model=model,
+                fallback_model=fallback_model,
+                correction_level=corr_level,
+                language_mode=lang_mode,
+                on_text_delta=lambda t: self.signals.preview_updated.emit(t),
+                on_turn_complete=lambda t: self.signals.inject_requested.emit(t),
+                on_status_change=lambda s: print(f"[GeminiLive Status] {s}"),
+            )
+            self.active_session.start()
+        else:
+            try:
+                self.active_session.set_language_mode(lang_mode)
+            except Exception:
+                pass
+            self.active_session.reset_transcript()
+
+    def _stream_pipeline(self):
+        """Pulls chunks from audio engine, streams over WebSocket to Gemini Live."""
+        while not self._stop_stream_flag and self.is_recording:
+            chunk = self.audio_engine.get_chunk(timeout=0.08)
+            if chunk:
+                self.accumulated_pcm.extend(chunk)
+                if self.active_session:
+                    self.active_session.send_pcm_chunk(chunk)
+
+    def stop_recording(self):
+        """Stops recording, signals turnComplete over WebSocket and triggers single clean injection."""
+        if not self.is_recording:
+            return
+
+        self.is_recording = False
+        self._stop_stream_flag = True
+
+        self.signals.status_changed.emit("transcribing", "Finalizing...")
+        self.tray.set_recording_state(False)
+
+        # Stop audio hardware
+        self.audio_engine.stop()
+
+        # Signal turn complete to Gemini Live over WebSocket
+        if self.active_session:
+            self.active_session.finish_turn()
+
+        # In worker thread, wait for WebSocket response or execute fallback
+        threading.Thread(target=self._finalize_transcription, daemon=True).start()
+
+    def _finalize_transcription(self):
+        # Wait up to ~4 seconds for Gemini Live WebSocket to deliver transcript.
+        # The old 1.5s timeout fired too early on slow networks, forcing an
+        # unnecessary REST fallback (which has different language behavior).
+        # Poll for a stable, non-empty transcript instead of a fixed short wait.
+        last_text = ""
+        stable_count = 0
+        for _ in range(80):  # 80 x 0.05s = 4.0s
+            if self._turn_finalized:
+                return
+            current = ""
+            if self.active_session:
+                try:
+                    current = (self.active_session._current_transcript or "").strip()
+                except Exception:
+                    current = ""
+            if current:
+                if current == last_text:
+                    stable_count += 1
+                else:
+                    stable_count = 0
+                    last_text = current
+                # Emit once text looks stable (same across ~300ms) or after 1.2s
+                # of having *some* text, so we don't cut off long utterances.
+                # The turnComplete callback path sets _turn_finalized and returns
+                # early; this path covers servers that never send turnComplete.
+                if stable_count >= 6:
+                    text = current
+                    self.signals.inject_requested.emit(text)
+                    return
+            time.sleep(0.05)
+
+        # One last check: if we have any text at all, use it.
+        if self._turn_finalized:
+            return
+        try:
+            tail = (self.active_session._current_transcript.strip()
+                    if self.active_session else "")
+        except Exception:
+            tail = ""
+        if tail:
+            self.signals.inject_requested.emit(tail)
+            return
+
+        if not self.accumulated_pcm:
+            self.signals.inject_requested.emit("")
+            return
+
+        # If WebSocket didn't return text after 4s, run REST fallback with gemini-2.0-flash
+        print("[SelfWhisper] WebSocket timed out; using Gemini fallback engine...")
+        api_key = config.get("api_key", "").strip()
+        corr_level = config.get("correction_level", "high")
+        lang_mode = config.get("language_mode", "bn_primary")
+
+        try:
+            result_text = GeminiTranscribeFallback.transcribe_audio_clip(
+                pcm_bytes=bytes(self.accumulated_pcm),
+                api_key=api_key,
+                model="gemini-2.0-flash",
+                correction_level=corr_level,
+                language_mode=lang_mode,
+            )
+            if not self._turn_finalized:
+                if result_text:
+                    self.signals.inject_requested.emit(result_text)
+                else:
+                    self.signals.inject_requested.emit("")
+                    self.signals.status_changed.emit("idle", "No speech detected.")
+        except Exception as e:
+            print(f"[SelfWhisper] Transcribe error: {e}")
+            if config.get("sound_effects_enabled", True):
+                play_error_sound()
+            self.signals.status_changed.emit("error", "Transcription failed!")
+            if not self._turn_finalized:
+                self.signals.inject_requested.emit("")
+
+    def _handle_injection(self, text: str):
+        """Called on Qt thread to finalize live dictation in the active application. Guaranteed single execution."""
+        if self._turn_finalized:
+            return
+        self._turn_finalized = True
+
+        clean_text = text.strip()
+        if not clean_text:
+            injector.finalize_live_session(None, target_hwnd=self.target_hwnd)
+            self.signals.status_changed.emit("idle", "")
+            if config.get("auto_hide_hud", False):
+                QTimer.singleShot(250, self.hud.hide)
+            return
+
+        try:
+            print(f"[SelfWhisper] Finalizing live dictation: {clean_text}")
+        except UnicodeEncodeError:
+            print(f"[SelfWhisper] Finalizing live dictation (Unicode len={len(clean_text)})")
+        log_dictation(clean_text)
+        self.hud.set_status("done", clean_text)
+
+        # Single subtle sound cue
+        if config.get("sound_effects_enabled", True):
+            play_stop_sound()
+
+        # Finalize live dictation in-place:
+        # types final diff/punctuation, appends space, saves clipboard backup, resets for next turn
+        injector.finalize_live_session(clean_text, target_hwnd=self.target_hwnd)
+
+        # If Auto-Hide HUD enabled, hide floating bar after brief visual feedback
+        if config.get("auto_hide_hud", False):
+            QTimer.singleShot(450, self.hud.hide)
+
+    def open_settings(self):
+        """Opens modal settings dialog."""
+        if self.settings_dialog is None or not self.settings_dialog.isVisible():
+            self.settings_dialog = SettingsDialog()
+            self.settings_dialog.settings_saved.connect(self._on_settings_saved)
+            self.settings_dialog.hud_reset_requested.connect(self.hud.position_bottom_right)
+            self.settings_dialog.show()
+            self.settings_dialog.activateWindow()
+
+    def _on_settings_saved(self):
+        """Reloads settings into active components."""
+        # Update text injector mode
+        injector.set_mode(config.get("injection_mode", "typewriter"))
+
+        # Update audio device
+        dev_idx = config.get("input_device_index")
+        self.audio_engine.set_device_index(dev_idx)
+
+        # Update hotkeys (both shortcuts are always active; no mode switch)
+        self.hotkey_mgr.update_keys(
+            config.get("hotkey_toggle", "<ctrl>+<shift>+<space>"),
+            config.get("hotkey_push_to_talk", "<f8>"),
+        )
+
+        # Reset live session so new API key or model takes effect
+        if self.active_session:
+            self.active_session.stop()
+            self.active_session = None
+
+        # Update language badge
+        self.hud.update_language_badge(config.get("language_mode", "bn_primary"))
+
+        # Check Auto-Hide state
+        if config.get("auto_hide_hud", False):
+            if not self.is_recording:
+                self.hud.hide()
+        else:
+            self.hud.show()
+
+        self.hud.set_status("idle", "Settings updated!")
+
+    def exit_app(self):
+        """Clean shutdown of background threads and app."""
+        # Save HUD coordinates
+        pos = self.hud.pos()
+        config.set("hud_x", pos.x(), auto_save=False)
+        config.set("hud_y", pos.y(), auto_save=True)
+
+        self.hotkey_mgr.stop()
+        self.audio_engine.stop()
+        if self.active_session:
+            self.active_session.stop()
+
+        self.hud.close()
+        self.qapp.quit()
+
+
+def main():
+    # Capture all logs/prints into the in-app Logs tab so the app can run
+    # without a console window (see run.bat -> pythonw).
+    install_log_store()
+
+    # Enable High DPI scaling
+    os.environ["QT_AUTO_SCREEN_SCALE_FACTOR"] = "1"
+
+    app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # Keep running in system tray
+    app.setApplicationName("Self-Whisper")
+
+    log("Self-Whisper starting...")
+    whisper_app = SelfWhisperApp(app)
+    log("Self-Whisper ready. Press Ctrl+Shift+Space or hold F8 to dictate.")
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

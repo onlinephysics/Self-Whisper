@@ -1,0 +1,1 @@
+# Self-Whisper UI Module

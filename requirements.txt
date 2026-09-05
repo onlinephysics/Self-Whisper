@@ -1,0 +1,6 @@
+PyQt6>=6.6.0
+sounddevice>=0.4.6
+websockets>=12.0
+pynput>=1.7.6
+pyperclip>=1.8.2
+cffi>=1.16.0

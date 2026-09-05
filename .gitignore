@@ -1,0 +1,18 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local test artifacts
+test_config.json
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
