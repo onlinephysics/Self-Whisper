@@ -16,7 +16,7 @@ import threading
 import time
 from typing import Optional
 
-from PyQt6.QtCore import QObject, pyqtSignal, QTimer
+from PyQt6.QtCore import QObject, Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from config import config
@@ -220,6 +220,11 @@ class SelfWhisperApp:
         self.tray.settings_requested.connect(self.open_settings)
         self.tray.language_changed.connect(self._set_language)
         self.tray.exit_requested.connect(self.exit_app)
+        try:
+            self.tray.messageClicked.connect(self._on_tray_message_clicked)
+        except Exception:
+            pass
+        self._tray_msg_opens_settings = False
 
     def _on_preview_updated(self, text: str):
         """Updates HUD and types live in the active application's textbox as you speak."""
@@ -578,26 +583,35 @@ class SelfWhisperApp:
     def _raise_settings(self):
         """Brings the settings window to the front, un-minimizing if needed.
 
-        Needed because Settings is often opened from a global hotkey while
-        another app owns the foreground — Windows then refuses activation and
-        the dialog ends up minimized/behind everything.
+        Settings is usually opened from a hotkey/tray click while another app
+        owns the foreground, and Windows actively blocks background apps from
+        stealing focus — without countermeasures the dialog ends up minimized
+        or hidden behind everything with no visible trace.
         """
         dlg = self.settings_dialog
         if dlg is None:
             return
-        try:
-            dlg.setWindowState(dlg.windowState() & ~Qt.WindowState.WindowMinimized)
-            dlg.show()
-            dlg.raise_()
-            dlg.activateWindow()
-        except Exception:
-            pass
+        log("Opening Settings window...")
+        # 1) Qt-level restore + raise (twice: immediately and after the
+        #    foreground lock has had a chance to clear).
+        for _ in range(2):
+            try:
+                st = dlg.windowState()
+                st &= ~Qt.WindowState.WindowMinimized
+                st |= Qt.WindowState.WindowActive
+                dlg.setWindowState(st)
+                dlg.show()
+                dlg.raise_()
+                dlg.activateWindow()
+            except Exception:
+                pass
+        # 2) Win32-level restore + foreground assist.
         try:
             import ctypes
             user32 = ctypes.windll.user32
             kernel32 = ctypes.windll.kernel32
             hwnd = int(dlg.winId())
-            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            user32.ShowWindow(hwnd, 1)  # SW_SHOWNORMAL: restore + activate
             fg = user32.GetForegroundWindow()
             if fg and fg != hwnd:
                 cur = kernel32.GetCurrentThreadId()
@@ -612,6 +626,65 @@ class SelfWhisperApp:
                 else:
                     user32.SetForegroundWindow(hwnd)
             dlg.activateWindow()
+        except Exception as e:
+            print(f"[SelfWhisper] Foreground assist failed: {e}")
+        # 3) Delayed second attempt (foreground lock often eats the first).
+        try:
+            QTimer.singleShot(150, self._reresise_settings)
+        except Exception:
+            pass
+        # 4) If it STILL is not the active window, make it findable: flash
+        #    the taskbar button and post a tray balloon that raises it.
+        try:
+            QTimer.singleShot(700, self._ensure_settings_visible)
+        except Exception:
+            pass
+
+    def _reresise_settings(self):
+        try:
+            dlg = self.settings_dialog
+            if dlg is not None and dlg.isVisible():
+                dlg.raise_()
+                dlg.activateWindow()
+        except Exception:
+            pass
+
+    def _ensure_settings_visible(self):
+        """Last resort: flash taskbar + balloon so the window can't hide."""
+        try:
+            dlg = self.settings_dialog
+            if dlg is None or not dlg.isVisible():
+                return
+            import ctypes
+            user32 = ctypes.windll.user32
+            if user32.GetForegroundWindow() == int(dlg.winId()):
+                return  # success, nothing to do
+            # Flash the taskbar button until it gets focus.
+            try:
+                class FLASHWINFO(ctypes.Structure):
+                    _fields_ = [("cbSize", ctypes.c_uint),
+                                ("hwnd", ctypes.c_void_p),
+                                ("dwFlags", ctypes.c_uint),
+                                ("uCount", ctypes.c_uint),
+                                ("dwTimeout", ctypes.c_uint)]
+                info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), int(dlg.winId()), 3, 5, 0)
+                user32.FlashWindowEx(ctypes.byref(info))
+            except Exception:
+                pass
+            self._tray_msg_opens_settings = True
+            self.tray.showMessage(
+                "Settings is open",
+                "Click here to bring the Settings window forward.",
+            )
+            log("Settings opened in background; posted tray balloon to find it.")
+        except Exception:
+            pass
+
+    def _on_tray_message_clicked(self):
+        try:
+            if getattr(self, "_tray_msg_opens_settings", False):
+                self._tray_msg_opens_settings = False
+                self._raise_settings()
         except Exception:
             pass
 
@@ -680,7 +753,11 @@ def main():
     if not instance_guard.try_acquire():
         sys.exit(0)
 
-    log("Self-Whisper starting...")
+    try:
+        from version import __version__ as _app_version
+    except Exception:
+        _app_version = ""
+    log(f"Self-Whisper v{_app_version} starting..." if _app_version else "Self-Whisper starting...")
     whisper_app = SelfWhisperApp(app)
     instance_guard.show_requested.connect(whisper_app._on_secondary_launch)
     log("Self-Whisper ready. Press Ctrl+Shift+Space or hold F8 to dictate.")

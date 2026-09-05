@@ -339,6 +339,14 @@ class SettingsDialog(QDialog):
         self.quit_btn.setToolTip("Close Self-Whisper completely")
         self.quit_btn.clicked.connect(self._confirm_quit)
         footer_layout.addWidget(self.quit_btn)
+        try:
+            from version import __version__ as _app_version
+        except Exception:
+            _app_version = ""
+        if _app_version:
+            ver_label = QLabel(f"v{_app_version}", footer_widget)
+            ver_label.setProperty("class", "hint")
+            footer_layout.addWidget(ver_label)
         footer_layout.addStretch(1)
         self.cancel_btn = QPushButton("Cancel", footer_widget)
         self.cancel_btn.clicked.connect(self._on_cancel)
@@ -404,14 +412,6 @@ class SettingsDialog(QDialog):
         card, cl = self._create_card("Language & Transcription", tab)
         form = QFormLayout()
         form.setSpacing(10)
-
-        self.lang_combo = QComboBox(tab)
-        # NOTE: no flag emoji — Windows cannot render flag glyphs (shows "BD" text).
-        self.lang_combo.addItem("Bangla + English (bilingual)", "bn_primary")
-        self.lang_combo.addItem("Bangla only", "bn_only")
-        self.lang_combo.addItem("English only", "en_only")
-        self.lang_combo.addItem("Auto detect", "auto")
-        form.addRow("Language focus:", self.lang_combo)
 
         self.correct_combo = QComboBox(tab)
         self.correct_combo.addItem("High: fix grammar, stutters, punctuate", "high")
@@ -834,10 +834,6 @@ class SettingsDialog(QDialog):
             self.api_key_input.setText(config.get("api_key", ""))
         self.model_combo.setCurrentText(config.get("model", "gemini-3.5-transcribe-live"))
 
-        lang_idx = self.lang_combo.findData(config.get("language_mode", "bn_primary"))
-        if lang_idx != -1:
-            self.lang_combo.setCurrentIndex(lang_idx)
-
         cor_idx = self.correct_combo.findData(config.get("correction_level", "high"))
         if cor_idx != -1:
             self.correct_combo.setCurrentIndex(cor_idx)
@@ -895,7 +891,7 @@ class SettingsDialog(QDialog):
         updates = {
             "api_key": stored_key,
             "model": self.model_combo.currentText().strip(),
-            "language_mode": self.lang_combo.currentData(),
+            # language_mode intentionally untouched: picked from bar/tray menu.
             "correction_level": self.correct_combo.currentData(),
             "sound_effects_enabled": self.sound_check.isChecked(),
             "auto_hide_hud": self.auto_hide_check.isChecked(),

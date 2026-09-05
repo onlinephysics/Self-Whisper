@@ -1,7 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller recipe for Self-Whisper (windowless single-folder build)."""
 
+import os
+import sys
+
 from PyInstaller.utils.hooks import collect_data_files
+
+SPEC_DIR = os.path.dirname(os.path.abspath(SPEC))
+sys.path.insert(0, SPEC_DIR)
+from version import __version__ as APP_VERSION
+
+APP_NAME = f"Self-Whisper-{APP_VERSION}"
 
 block_cipher = None
 
@@ -34,7 +43,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="Self-Whisper",
+    name=APP_NAME,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -54,5 +63,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="Self-Whisper",
+    name=APP_NAME,
 )

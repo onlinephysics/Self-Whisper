@@ -21,7 +21,7 @@ if errorlevel 1 (
 
 echo.
 echo ============================================================
-echo Build OK: dist\Self-Whisper\Self-Whisper.exe
+echo Build OK: dist\Self-Whisper-*\Self-Whisper-*.exe (versioned folder)
 echo Copy that folder anywhere and run it - no Python needed.
 echo (Your API key stays in Windows Credential Manager.)
 echo ============================================================

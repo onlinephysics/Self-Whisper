@@ -1,6 +1,7 @@
 # PyInstaller build output
 dist/
 build/
+installer-out/
 
 # Python bytecode
 __pycache__/

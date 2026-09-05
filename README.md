@@ -20,7 +20,7 @@ Only one copy runs at a time: launching it again just brings the running app for
 2. **Specialized for Bangla (বাংলা) & English**:
    - Primary focus on **Bangla (বাংলা লিপি)** phonetics and vocabulary.
    - Flawless **code-switching ("Banglish")**: comfortably speak sentences mixing Bangla and English (e.g., *"আমি কালকে Discord-এ মিটিং করব"* or *"WhatsApp-এ লিঙ্কটা পাঠাও"*).
-   - Pick the language from the floating bar, the tray menu, or Settings (`BN · EN`, `বাংলা`, `EN`, `AUTO`). Hindi/Devanagari output is explicitly forbidden in every mode.
+   - Pick the language from the floating bar or the tray menu (`BN · EN`, `বাংলা`, `EN`, `AUTO`). Hindi/Devanagari output is explicitly forbidden in every mode.
 
 3. **Built-in Auto-Correction & Punctuation Refinement**:
    - Cleans up stutters, false starts, and filler sounds (*"uh"*, *"um"*, *"মানে"*).
@@ -52,9 +52,11 @@ Only one copy runs at a time: launching it again just brings the running app for
 
 ## Quick Start
 
-### Option A — EXE (no Python needed)
-1. Double-click `build_exe.bat` (builds `dist\Self-Whisper\Self-Whisper.exe`).
-2. Copy the `dist\Self-Whisper` folder anywhere and run `Self-Whisper.exe`.
+### Option A — Installer (recommended, no Python needed)
+1. Double-click `build_installer.bat` (builds the app if needed, then the setup).
+2. Run `installer-out\Self-Whisper-Setup-2.0.0.exe` — the wizard lets you choose
+   the install folder, adds Start Menu shortcuts, and provides an uninstaller.
+   No admin rights required.
 
 ### Option B — From source
 Requirements: Windows 10/11 (64-bit), Python 3.10+, a Google AI Studio API key ([get one free](https://aistudio.google.com/app/apikey)).
