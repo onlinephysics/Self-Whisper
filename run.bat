@@ -4,20 +4,22 @@ title Self-Whisper Speech to Text (Gemini Live)
 
 rem Windowless launch: logs and dictation history live in Settings -> Logs.
 rem (Use run_debug.bat if you need the old console window for troubleshooting.)
+rem Requires: uv sync --locked (deps come from uv.lock)
+
+where uv >nul 2>&1
+if not errorlevel 1 (
+    start "" /min uv run --no-sync pythonw -m self_whisper
+    exit /b 0
+)
 
 where pythonw >nul 2>&1
 if not errorlevel 1 (
-    start "" /min pythonw main.py
+    echo [WARN] uv not found; running without locked env.
+    start "" /min pythonw -m self_whisper
     exit /b 0
 )
 
-where python >nul 2>&1
-if not errorlevel 1 (
-    start "" /min python main.py
-    exit /b 0
-)
-
-echo [ERROR] Python is not found in PATH!
-echo Please install Python from python.org and add it to PATH.
+echo [ERROR] Neither uv nor Python found in PATH!
+echo Install Python from python.org and run: pip install uv ^&^& uv sync
 pause
 exit /b 1

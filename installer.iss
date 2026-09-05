@@ -4,10 +4,12 @@
 ; destination-folder page so the user chooses where to install.
 
 #define MyAppName "Self-Whisper"
+; Keep in sync with src/self_whisper/core/version.py and pyproject.toml.
 #define MyAppVersion "2.0.0"
 #define MyAppPublisher "Self Study"
 #define MyAppURL "https://www.selfstudy.xyz"
-#define MyAppExeName "Self-Whisper.exe"
+#define MyAppExeName "Self-Whisper-" + MyAppVersion + ".exe"
+#define MyAppBuildDir "dist\Self-Whisper-" + MyAppVersion
 
 [Setup]
 AppId={{85D63A56-B523-4857-BFD5-3EFE755CCEFE}
@@ -37,7 +39,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "startmenu"; Description: "Create a Start Menu shortcut"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-Source: "dist\Self-Whisper\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#MyAppBuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: startmenu

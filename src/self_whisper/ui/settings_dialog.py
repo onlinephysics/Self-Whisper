@@ -30,8 +30,8 @@ from PyQt6.QtWidgets import (
     QApplication,
 )
 
-from config import config
-from audio_capture import list_input_devices, AudioCaptureEngine
+from self_whisper.core.config import config
+from self_whisper.audio.capture import list_input_devices, AudioCaptureEngine
 
 
 def create_mic_pixmap(size: int = 22, bg: str = "#2563eb") -> QPixmap:
@@ -340,7 +340,7 @@ class SettingsDialog(QDialog):
         self.quit_btn.clicked.connect(self._confirm_quit)
         footer_layout.addWidget(self.quit_btn)
         try:
-            from version import __version__ as _app_version
+            from self_whisper.core.version import __version__ as _app_version
         except Exception:
             _app_version = ""
         if _app_version:
@@ -563,7 +563,7 @@ class SettingsDialog(QDialog):
 
     # ------------------------------------------------- hotkey recording ----
     def _start_key_capture(self, target: QLineEdit, button: QPushButton):
-        from hotkey_recorder import HotkeyCapture
+        from self_whisper.input.hotkey_recorder import HotkeyCapture
         self._stop_key_capture(silent=True)
         self._capture_target = target
         self._capture_button = button
@@ -662,7 +662,7 @@ class SettingsDialog(QDialog):
     # ---------------------------------------------------------------- logs --
     def _load_logs(self):
         try:
-            from log_store import get_app_lines, get_dictations, log_hub
+            from self_whisper.core.log_store import get_app_lines, get_dictations, log_hub
             for ts, text in get_dictations():
                 self.history_list.addItem(f"[{ts}] {text}")
             self.history_list.scrollToBottom()
@@ -694,7 +694,7 @@ class SettingsDialog(QDialog):
 
     def _copy_history(self):
         try:
-            from log_store import get_dictations
+            from self_whisper.core.log_store import get_dictations
             text = "\n".join(f"[{ts}] {t}" for ts, t in get_dictations())
             QApplication.clipboard().setText(text)
         except Exception:
@@ -702,14 +702,14 @@ class SettingsDialog(QDialog):
 
     def _copy_all(self):
         try:
-            from log_store import get_logs_text
+            from self_whisper.core.log_store import get_logs_text
             QApplication.clipboard().setText(get_logs_text())
         except Exception:
             pass
 
     def _clear_logs(self):
         try:
-            from log_store import clear_all
+            from self_whisper.core.log_store import clear_all
             clear_all()
         except Exception:
             self.history_list.clear()
@@ -819,7 +819,7 @@ class SettingsDialog(QDialog):
     def _load_values(self):
         # API key: vault first, legacy config file second (one-time migration).
         try:
-            import secure_store
+            from self_whisper.platform_win import secure_store
             legacy = (config.get("api_key", "") or "").strip()
             if legacy and not secure_store.get_api_key():
                 if secure_store.migrate_from_config(legacy):
@@ -879,7 +879,7 @@ class SettingsDialog(QDialog):
         # in the plain config file when no vault backend is available.
         typed_key = self.api_key_input.text().strip()
         try:
-            import secure_store
+            from self_whisper.platform_win import secure_store
             if secure_store.available():
                 secure_store.set_api_key(typed_key)
                 stored_key = ""  # never persist plain text when vault works

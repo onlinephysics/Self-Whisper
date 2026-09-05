@@ -13,8 +13,18 @@ __pycache__/
 venv/
 env/
 
+# Build metadata
+*.egg-info/
+src/*.egg-info/
+
 # Local test artifacts
 test_config.json
+tests/test_config.json
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
 
 # OS / editors
 .DS_Store

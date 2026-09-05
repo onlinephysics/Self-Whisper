@@ -15,14 +15,16 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies (locked)
+        run: uv sync --locked --group dev
 
       - name: Compile check
-        run: |
-          python -m py_compile main.py log_store.py vad.py secure_store.py hotkey_manager.py hotkey_recorder.py gemini_live.py config.py audio_capture.py text_injector.py sound_effects.py test_verification.py ui/floating_hud.py ui/tray_icon.py ui/settings_dialog.py
+        run: uv run python -m compileall -q src tests
 
       - name: Run verification suite
-        run: python test_verification.py -v
+        run: uv run pytest -v

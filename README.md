@@ -59,13 +59,14 @@ Only one copy runs at a time: launching it again just brings the running app for
    No admin rights required.
 
 ### Option B — From source
-Requirements: Windows 10/11 (64-bit), Python 3.10+, a Google AI Studio API key ([get one free](https://aistudio.google.com/app/apikey)).
+Requirements: Windows 10/11 (64-bit), Python 3.10+, [uv](https://docs.astral.sh/uv/) (`pip install uv`), a Google AI Studio API key ([get one free](https://aistudio.google.com/app/apikey)).
 
 ```powershell
-pip install -r requirements.txt
+uv sync --locked --group dev
 ```
 
 Double-click `run.bat` (windowless) or `run_debug.bat` (with console for troubleshooting).
+Dependencies are pinned in `uv.lock` so every checkout and CI run resolves the exact same versions. Run the app with `uv run python -m self_whisper` or `self-whisper` (via `[project.scripts]`).
 
 ### Setting up your API Key
 1. Click the gear on the floating bar, or right-click the tray icon → **Settings...**.
@@ -111,30 +112,26 @@ General settings live in `~/.self_whisper/config.json`. The API key lives in Win
 
 ```
 Self-Whisper/
-├── main.py                # App coordinator (tray, hotkeys, streaming, injection)
-├── config.py              # Settings persistence (~/.self_whisper/config.json)
-├── secure_store.py        # API key in Windows Credential Manager (+ fallback)
-├── audio_capture.py       # 16kHz PCM engine with real-time level metering
-├── vad.py                 # Auto-stop-on-silence detector
-├── gemini_live.py         # Gemini Live WebSocket + REST fallback client
-├── text_injector.py       # Live in-place typing + smart-paste injector
-├── hotkey_manager.py      # Global listener (toggle chord + push-to-talk)
-├── hotkey_recorder.py     # Press-to-capture shortcut recorder
-├── log_store.py           # In-memory logs + dictation history (Logs tab)
-├── single_instance.py     # One-copy-only guard
-├── ui/
-│   ├── floating_hud.py    # Floating pill: EQ visualizer, mic icon, language menu
-│   ├── settings_dialog.py # Tabbed settings incl. mic test + Logs viewer
-│   └── tray_icon.py       # Tray icon with full context menu
-├── test_verification.py   # Automated test suite (11 tests)
-├── requirements.txt       # Runtime dependencies
+├── src/self_whisper/
+│   ├── app.py             # App coordinator (tray, hotkeys, streaming, injection)
+│   ├── __main__.py        # `python -m self_whisper` entry point
+│   ├── core/              # config, log_store, version
+│   ├── audio/             # capture (16kHz PCM), vad, sound_effects
+│   ├── transcription/     # Gemini Live WebSocket + REST fallback client
+│   ├── input/             # hotkey_manager, hotkey_recorder, injector
+│   ├── platform_win/      # single_instance guard, secure_store (Credential Manager)
+│   └── ui/                # floating_hud, settings_dialog, tray_icon
+├── tests/
+│   └── test_verification.py # Automated test suite (11 tests)
+├── pyproject.toml         # Project metadata + pinned dependency floors
+├── uv.lock                # Exact locked versions (deterministic CI/builds)
 ├── SelfWhisper.spec       # PyInstaller recipe (windowless EXE)
-├── build_exe.bat          # One-click EXE build
-├── run.bat                # Windowless launcher
+├── build_exe.bat          # One-click EXE build (uv sync + pyinstaller)
+├── run.bat                # Windowless launcher (`uv run ... -m self_whisper`)
 └── run_debug.bat          # Console launcher for troubleshooting
 ```
 
-CI runs the compile check + test suite on every push/PR (`.github/workflows/ci.yml`).
+CI runs the compile check + test suite on every push/PR (`.github/workflows/ci.yml`) using `uv sync --locked`.
 
 ---
 

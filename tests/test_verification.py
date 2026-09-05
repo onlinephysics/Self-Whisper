@@ -8,18 +8,14 @@ Tests:
 """
 
 import os
-import sys
 import unittest
 import math
 import struct
 
-# Ensure local imports work
-sys.path.insert(0, os.path.dirname(__file__))
-
-from config import ConfigManager
-from text_injector import get_clipboard_text, set_clipboard_text, injector
-from audio_capture import list_input_devices
-from gemini_live import SYSTEM_INSTRUCTIONS, GeminiLiveSession
+from self_whisper.core.config import ConfigManager
+from self_whisper.input.injector import get_clipboard_text, set_clipboard_text, injector
+from self_whisper.audio.capture import list_input_devices
+from self_whisper.transcription.gemini_live import SYSTEM_INSTRUCTIONS, GeminiLiveSession
 
 
 class TestSelfWhisper(unittest.TestCase):
@@ -157,7 +153,7 @@ class TestSelfWhisper(unittest.TestCase):
 
     def test_06_vad_silence_detector(self):
         """SilenceDetector fires once after speech + silence, never otherwise."""
-        from vad import SilenceDetector
+        from self_whisper.audio.vad import SilenceDetector
 
         # Case 1: speech then long silence -> fires exactly once.
         d = SilenceDetector(threshold=0.08, silence_ms=1000, min_speech_ms=300, min_total_ms=500)
@@ -191,7 +187,7 @@ class TestSelfWhisper(unittest.TestCase):
     def test_07_hotkeys_both_active(self):
         """Toggle chord and PTT key each fire independently (no mode gating)."""
         from pynput import keyboard
-        from hotkey_manager import GlobalHotkeyManager
+        from self_whisper.input.hotkey_manager import GlobalHotkeyManager
 
         toggles, starts, stops = [], [], []
         m = GlobalHotkeyManager(
@@ -225,7 +221,7 @@ class TestSelfWhisper(unittest.TestCase):
 
     def test_08_log_store_roundtrip(self):
         """log_store keeps app lines and dictation history, then clears."""
-        import log_store
+        from self_whisper.core import log_store
         log_store.clear_all()
         log_store.log("unit-test line")
         log_store.log_dictation("unit-test dictation")
@@ -237,8 +233,8 @@ class TestSelfWhisper(unittest.TestCase):
 
     def test_09_hotkey_string_builder(self):
         """Recorder output orders modifiers first and round-trips the parser."""
-        from hotkey_recorder import build_hotkey_string
-        from hotkey_manager import parse_hotkey_to_set
+        from self_whisper.input.hotkey_recorder import build_hotkey_string
+        from self_whisper.input.hotkey_manager import parse_hotkey_to_set
         s = build_hotkey_string(["space", "shift", "ctrl"])
         self.assertEqual(s, "ctrl+shift+space")
         self.assertEqual(parse_hotkey_to_set(s), frozenset({"ctrl", "shift", "space"}))
@@ -246,7 +242,7 @@ class TestSelfWhisper(unittest.TestCase):
 
     def test_10_secure_store(self):
         """Vault round-trips when available; safe no-op otherwise."""
-        import secure_store
+        from self_whisper.platform_win import secure_store
         if not secure_store.available():
             self.assertEqual(secure_store.get_api_key(), "")
             self.assertFalse(secure_store.set_api_key("x"))
@@ -259,7 +255,7 @@ class TestSelfWhisper(unittest.TestCase):
 
     def test_11_prompts_forbid_hindi_everywhere(self):
         """Every language mode carries the anti-Hindi/Devanagari constraint."""
-        from gemini_live import build_system_prompt
+        from self_whisper.transcription.gemini_live import build_system_prompt
         for mode in ("bn_primary", "bn_only", "en_only", "auto"):
             for corr in ("high", "normal", "verbatim"):
                 p = build_system_prompt(mode, corr)

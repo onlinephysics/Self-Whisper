@@ -1,0 +1,35 @@
+[project]
+name = "self-whisper"
+version = "2.0.0"
+description = "Real-time Windows speech-to-text dictation powered by Gemini Live"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+dependencies = [
+    "PyQt6>=6.6.0",
+    "sounddevice>=0.4.6",
+    "websockets>=12.0",
+    "pynput>=1.7.6",
+    "pyperclip>=1.8.2",
+    "cffi>=1.16.0",
+    "keyring>=25.0.0",
+]
+
+[project.scripts]
+self-whisper = "self_whisper.app:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/self_whisper"]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.0",
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.uv]
+package = true

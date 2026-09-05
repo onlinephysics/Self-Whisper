@@ -7,7 +7,7 @@ could see logs/prints. Now everything is captured here and shown in the
 Settings -> Logs tab, so the app can run windowless (pythonw / no console).
 
 Usage:
-    from log_store import log, log_dictation, get_logs_text, ...
+    from self_whisper.core.log_store import log, log_dictation, get_logs_text, ...
     log("message")               # INFO-level app log (also goes to `logging`)
     log_dictation("আমি ...")     # finalized dictation entry (history section)
 

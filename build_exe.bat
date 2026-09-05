@@ -2,17 +2,28 @@
 set PYTHONIOENCODING=utf-8
 title Build Self-Whisper EXE
 
-echo Installing builder (PyInstaller)...
-python -m pip install --upgrade pyinstaller
+where uv >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Could not install PyInstaller.
+    echo Installing uv (project manager)...
+    pip install uv
+    if errorlevel 1 (
+        echo [ERROR] Could not install uv.
+        pause
+        exit /b 1
+    )
+)
+
+echo Syncing locked dependencies...
+uv sync --locked --group dev
+if errorlevel 1 (
+    echo [ERROR] Dependency sync failed.
     pause
     exit /b 1
 )
 
 echo.
 echo Building windowless EXE (this takes a few minutes)...
-pyinstaller --noconfirm SelfWhisper.spec
+uv run pyinstaller --noconfirm SelfWhisper.spec
 if errorlevel 1 (
     echo [ERROR] Build failed.
     pause

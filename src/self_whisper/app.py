@@ -19,18 +19,18 @@ from typing import Optional
 from PyQt6.QtCore import QObject, Qt, pyqtSignal, QTimer
 from PyQt6.QtWidgets import QApplication, QMessageBox
 
-from config import config
-from log_store import install as install_log_store, log, log_dictation
-from single_instance import SingleInstanceGuard
-from vad import SilenceDetector
-from audio_capture import AudioCaptureEngine
-from gemini_live import GeminiLiveSession, GeminiTranscribeFallback
-from text_injector import injector
-from hotkey_manager import GlobalHotkeyManager
-from ui.floating_hud import FloatingHUD
-from ui.settings_dialog import SettingsDialog
-from ui.tray_icon import SelfWhisperTray
-from sound_effects import play_start_sound, play_stop_sound, play_success_sound, play_error_sound
+from self_whisper.core.config import config
+from self_whisper.core.log_store import install as install_log_store, log, log_dictation
+from self_whisper.platform_win.single_instance import SingleInstanceGuard
+from self_whisper.audio.vad import SilenceDetector
+from self_whisper.audio.capture import AudioCaptureEngine
+from self_whisper.transcription.gemini_live import GeminiLiveSession, GeminiTranscribeFallback
+from self_whisper.input.injector import injector
+from self_whisper.input.hotkey_manager import GlobalHotkeyManager
+from self_whisper.ui.floating_hud import FloatingHUD
+from self_whisper.ui.settings_dialog import SettingsDialog
+from self_whisper.ui.tray_icon import SelfWhisperTray
+from self_whisper.audio.sound_effects import play_start_sound, play_stop_sound, play_error_sound
 
 
 class AppSignals(QObject):
@@ -53,7 +53,7 @@ class SelfWhisperApp:
     def _get_api_key() -> str:
         """Vault (Credential Manager) first, legacy config file second."""
         try:
-            import secure_store
+            from self_whisper.platform_win import secure_store
             vault_key = secure_store.get_api_key()
             if vault_key:
                 return vault_key
@@ -754,7 +754,7 @@ def main():
         sys.exit(0)
 
     try:
-        from version import __version__ as _app_version
+        from self_whisper.core.version import __version__ as _app_version
     except Exception:
         _app_version = ""
     log(f"Self-Whisper v{_app_version} starting..." if _app_version else "Self-Whisper starting...")

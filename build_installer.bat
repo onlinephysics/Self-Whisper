@@ -17,12 +17,12 @@ if not exist %ISCC% (
     exit /b 1
 )
 
-if not exist "dist\Self-Whisper\Self-Whisper.exe" (
+if not exist "dist\Self-Whisper-2.0.0\Self-Whisper-2.0.0.exe" (
     echo Building the app first...
     call build_exe.bat
     if errorlevel 1 exit /b 1
 ) else (
-    echo Found dist\Self-Whisper - reusing it. Delete dist\ to force a rebuild.
+    echo Found dist\Self-Whisper-2.0.0 - reusing it. Delete dist\ to force a rebuild.
 )
 
 echo.

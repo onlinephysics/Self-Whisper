@@ -22,7 +22,7 @@ try:
 except Exception:  # pragma: no cover
     _Base = object  # type: ignore
 
-from hotkey_manager import canonical_key_token
+from self_whisper.input.hotkey_manager import canonical_key_token
 
 _MODIFIER_ORDER = ("ctrl", "shift", "alt", "cmd")
 _TIMEOUT_S = 12.0
