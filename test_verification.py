@@ -44,7 +44,14 @@ class TestSelfWhisper(unittest.TestCase):
         """
         Verify complex Bengali Unicode strings (যুক্তবর্ণ) are preserved
         with 100% fidelity through Windows clipboard APIs.
+        Skipped automatically on headless machines (CI) with no clipboard.
         """
+        try:
+            probe_ok = set_clipboard_text("probe")
+        except Exception:
+            probe_ok = False
+        if not probe_ok:
+            self.skipTest("No system clipboard available (headless environment).")
         test_phrases = [
             "আমি বাংলায় গান গাই।",
             "যুক্তবর্ণ পরীক্ষা: ক্ষ, জ্ঞ, ঙ্ক, ণ্ড, হ্ম, ঞ্চ, ঙ্গ, ্য-ফলা, র-ফলা",
@@ -147,6 +154,117 @@ class TestSelfWhisper(unittest.TestCase):
         self.assertEqual(b, 0)
         self.assertEqual(t, "কেমন আছেন সবাই?")
         # Verified: Previous text in the textbox is NEVER touched!
+
+    def test_06_vad_silence_detector(self):
+        """SilenceDetector fires once after speech + silence, never otherwise."""
+        from vad import SilenceDetector
+
+        # Case 1: speech then long silence -> fires exactly once.
+        d = SilenceDetector(threshold=0.08, silence_ms=1000, min_speech_ms=300, min_total_ms=500)
+        t = 1000.0
+        d.reset(now=t)
+        for _ in range(10):  # 1s of speech in 100ms steps
+            t += 0.1
+            self.assertFalse(d.update(0.5, now=t))
+        for _ in range(9):   # 0.9s silence -> not yet
+            t += 0.1
+            self.assertFalse(d.update(0.0, now=t))
+        t += 0.2             # 1.1s silence -> fires
+        self.assertTrue(d.update(0.0, now=t))
+        self.assertFalse(d.update(0.0, now=t + 1.0))  # latched, never twice
+
+        # Case 2: silence with no speech first -> never fires.
+        d2 = SilenceDetector(threshold=0.08, silence_ms=500, min_speech_ms=300, min_total_ms=200)
+        t = 2000.0
+        d2.reset(now=t)
+        for _ in range(30):
+            t += 0.1
+            self.assertFalse(d2.update(0.0, now=t))
+
+        # Case 3: grace period after hotkey press -> never fires early.
+        d3 = SilenceDetector(threshold=0.08, silence_ms=100, min_speech_ms=50, min_total_ms=2000)
+        t = 3000.0
+        d3.reset(now=t)
+        t += 0.1
+        self.assertFalse(d3.update(0.0, now=t))
+
+    def test_07_hotkeys_both_active(self):
+        """Toggle chord and PTT key each fire independently (no mode gating)."""
+        from pynput import keyboard
+        from hotkey_manager import GlobalHotkeyManager
+
+        toggles, starts, stops = [], [], []
+        m = GlobalHotkeyManager(
+            toggle_hotkey="ctrl+shift+space", push_to_talk_key="f8",
+            on_toggle_callback=lambda: toggles.append(1),
+            on_push_start_callback=lambda: starts.append(1),
+            on_push_stop_callback=lambda: stops.append(1),
+        )
+        # Toggle chord works...
+        m._handle_press(keyboard.Key.ctrl_l)
+        m._handle_press(keyboard.Key.shift_l)
+        m._handle_press(keyboard.Key.space)
+        self.assertEqual(len(toggles), 1)
+        # ...and PTT works in the same session without any mode switch.
+        m._handle_release(keyboard.Key.space)
+        m._handle_release(keyboard.Key.shift_l)
+        m._handle_release(keyboard.Key.ctrl_l)
+        m._last_toggle_fire -= 10.0  # bypass debounce for the test
+        m._handle_press(keyboard.Key.f8)
+        self.assertEqual(len(starts), 1)
+        m._handle_release(keyboard.Key.f8)
+        self.assertEqual(len(stops), 1)
+        # Space auto-repeat can never double-toggle.
+        m._handle_press(keyboard.Key.ctrl_l)
+        m._handle_press(keyboard.Key.shift_l)
+        m._handle_press(keyboard.Key.space)
+        n = len(toggles)
+        m._handle_press(keyboard.Key.space)
+        m._handle_press(keyboard.Key.space)
+        self.assertEqual(len(toggles), n)
+
+    def test_08_log_store_roundtrip(self):
+        """log_store keeps app lines and dictation history, then clears."""
+        import log_store
+        log_store.clear_all()
+        log_store.log("unit-test line")
+        log_store.log_dictation("unit-test dictation")
+        self.assertTrue(any("unit-test line" in l for l in log_store.get_app_lines()))
+        self.assertTrue(any(t == "unit-test dictation" for _, t in log_store.get_dictations()))
+        self.assertIn("unit-test dictation", log_store.get_logs_text())
+        log_store.clear_all()
+        self.assertEqual(log_store.get_dictations(), [])
+
+    def test_09_hotkey_string_builder(self):
+        """Recorder output orders modifiers first and round-trips the parser."""
+        from hotkey_recorder import build_hotkey_string
+        from hotkey_manager import parse_hotkey_to_set
+        s = build_hotkey_string(["space", "shift", "ctrl"])
+        self.assertEqual(s, "ctrl+shift+space")
+        self.assertEqual(parse_hotkey_to_set(s), frozenset({"ctrl", "shift", "space"}))
+        self.assertEqual(build_hotkey_string(["f8"]), "f8")
+
+    def test_10_secure_store(self):
+        """Vault round-trips when available; safe no-op otherwise."""
+        import secure_store
+        if not secure_store.available():
+            self.assertEqual(secure_store.get_api_key(), "")
+            self.assertFalse(secure_store.set_api_key("x"))
+            return
+        try:
+            self.assertTrue(secure_store.set_api_key("unit-test-key"))
+            self.assertEqual(secure_store.get_api_key(), "unit-test-key")
+        finally:
+            secure_store.set_api_key("")
+
+    def test_11_prompts_forbid_hindi_everywhere(self):
+        """Every language mode carries the anti-Hindi/Devanagari constraint."""
+        from gemini_live import build_system_prompt
+        for mode in ("bn_primary", "bn_only", "en_only", "auto"):
+            for corr in ("high", "normal", "verbatim"):
+                p = build_system_prompt(mode, corr)
+                self.assertIn("Devanagari", p, f"missing Devanagari guard: {mode}/{corr}")
+                self.assertIn("NEVER output Hindi", p, f"missing Hindi guard: {mode}/{corr}")
 
 
 if __name__ == "__main__":

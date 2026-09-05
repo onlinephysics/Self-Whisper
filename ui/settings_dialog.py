@@ -35,14 +35,19 @@ from audio_capture import list_input_devices, AudioCaptureEngine
 
 
 def create_mic_pixmap(size: int = 22, bg: str = "#2563eb") -> QPixmap:
-    """Modern vector microphone glyph (no emoji dependency)."""
+    """Modern vector microphone glyph on a gradient disc (no emoji dependency)."""
+    from PyQt6.QtGui import QLinearGradient
     pixmap = QPixmap(size, size)
     pixmap.fill(QColor(0, 0, 0, 0))
     p = QPainter(pixmap)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
     s = float(size)
-    # backdrop disc
-    p.setBrush(QBrush(QColor(bg)))
+    # backdrop gradient disc
+    base = QColor(bg)
+    grad = QLinearGradient(0, 0, s, s)
+    grad.setColorAt(0.0, base.lighter(135))
+    grad.setColorAt(1.0, base.darker(115))
+    p.setBrush(QBrush(grad))
     p.setPen(Qt.PenStyle.NoPen)
     p.drawEllipse(0, 0, size, size)
     # mic capsule
@@ -70,6 +75,7 @@ def create_mic_pixmap(size: int = 22, bg: str = "#2563eb") -> QPixmap:
 class SettingsDialog(QDialog):
     settings_saved = pyqtSignal()
     hud_reset_requested = pyqtSignal()
+    quit_requested = pyqtSignal()
     mic_level = pyqtSignal(int)  # thread-safe volume meter (audio thread -> GUI)
 
     def __init__(self, parent=None):
@@ -80,6 +86,9 @@ class SettingsDialog(QDialog):
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         self._test_audio_engine = None
+        self._capture = None
+        self._capture_target = None
+        self._capture_button = None
         self.mic_level.connect(self._set_meter)
         self._init_styling()
         self._init_ui()
@@ -225,6 +234,17 @@ class SettingsDialog(QDialog):
                 background-color: rgba(91, 156, 246, 0.25);
                 color: #7db3f8;
             }
+            QPushButton#DangerBtn {
+                background-color: rgba(220, 38, 38, 0.12);
+                border: 1px solid #dc2626;
+                color: #fca5a5;
+                padding: 7px 14px;
+                font-weight: 600;
+            }
+            QPushButton#DangerBtn:hover {
+                background-color: #dc2626;
+                color: #ffffff;
+            }
             QProgressBar {
                 background-color: #1c1f26;
                 border: 1px solid #3a3f4c;
@@ -314,6 +334,11 @@ class SettingsDialog(QDialog):
         footer_widget.setStyleSheet("background-color: #252930; border-top: 1px solid #3a3f4c;")
         footer_layout = QHBoxLayout(footer_widget)
         footer_layout.setContentsMargins(18, 10, 18, 10)
+        self.quit_btn = QPushButton("Quit App", footer_widget)
+        self.quit_btn.setObjectName("DangerBtn")
+        self.quit_btn.setToolTip("Close Self-Whisper completely")
+        self.quit_btn.clicked.connect(self._confirm_quit)
+        footer_layout.addWidget(self.quit_btn)
         footer_layout.addStretch(1)
         self.cancel_btn = QPushButton("Cancel", footer_widget)
         self.cancel_btn.clicked.connect(self._on_cancel)
@@ -342,6 +367,10 @@ class SettingsDialog(QDialog):
         self.show_key_btn.clicked.connect(self._toggle_key_visibility)
         key_row.addWidget(self.show_key_btn)
         cl.addLayout(key_row)
+
+        self.key_storage_hint = QLabel("", tab)
+        self.key_storage_hint.setProperty("class", "hint")
+        cl.addWidget(self.key_storage_hint)
 
         model_row = QHBoxLayout()
         model_row.setSpacing(8)
@@ -451,6 +480,25 @@ class SettingsDialog(QDialog):
         self.volume_label.setFixedWidth(38)
         meter_row.addWidget(self.volume_label)
         cl.addLayout(meter_row)
+
+        vad_row = QHBoxLayout()
+        vad_row.setSpacing(8)
+        self.vad_check = QCheckBox("Auto-stop on silence", tab)
+        self.vad_check.setToolTip(
+            "End dictation automatically after you go silent "
+            "(only for toggle mode; push-to-talk stops on key release).")
+        vad_row.addWidget(self.vad_check)
+        vad_row.addWidget(QLabel("Silence:", tab))
+        self.vad_silence_combo = QComboBox(tab)
+        self.vad_silence_combo.addItem("1.0 s", 1000)
+        self.vad_silence_combo.addItem("1.5 s", 1500)
+        self.vad_silence_combo.addItem("1.8 s", 1800)
+        self.vad_silence_combo.addItem("2.5 s", 2500)
+        self.vad_silence_combo.addItem("3.5 s", 3500)
+        self.vad_silence_combo.setToolTip("How long silence ends the dictation.")
+        vad_row.addWidget(self.vad_silence_combo)
+        vad_row.addStretch(1)
+        cl.addLayout(vad_row)
         layout.addWidget(card)
 
         hint = QLabel("Press Test Mic and speak — the bar should move with your voice. Press Stop Test when done.", tab)
@@ -465,20 +513,45 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(tab)
         layout.setSpacing(10)
         card, cl = self._create_card("Global Shortcuts (both always active)", tab)
-        form = QFormLayout()
-        form.setSpacing(10)
 
+        toggle_row = QHBoxLayout()
+        toggle_row.setSpacing(8)
+        toggle_row.addWidget(QLabel("Toggle (press to start/stop):", tab), 1)
         self.toggle_key_input = QLineEdit(tab)
         self.toggle_key_input.setPlaceholderText("ctrl+shift+space")
-        form.addRow("Toggle (press to start/stop):", self.toggle_key_input)
+        self.toggle_key_input.setMinimumWidth(170)
+        toggle_row.addWidget(self.toggle_key_input)
+        self.toggle_record_btn = QPushButton("Record", tab)
+        self.toggle_record_btn.setObjectName("ActionBtn")
+        self.toggle_record_btn.clicked.connect(
+            lambda: self._start_key_capture(self.toggle_key_input, self.toggle_record_btn))
+        toggle_row.addWidget(self.toggle_record_btn)
+        cl.addLayout(toggle_row)
 
+        ptt_row = QHBoxLayout()
+        ptt_row.setSpacing(8)
+        ptt_row.addWidget(QLabel("Push-to-talk (hold to talk):", tab), 1)
         self.ptt_key_input = QLineEdit(tab)
         self.ptt_key_input.setPlaceholderText("f8")
-        form.addRow("Push-to-talk (hold to talk):", self.ptt_key_input)
-        cl.addLayout(form)
+        self.ptt_key_input.setMinimumWidth(170)
+        ptt_row.addWidget(self.ptt_key_input)
+        self.ptt_record_btn = QPushButton("Record", tab)
+        self.ptt_record_btn.setObjectName("ActionBtn")
+        self.ptt_record_btn.clicked.connect(
+            lambda: self._start_key_capture(self.ptt_key_input, self.ptt_record_btn))
+        ptt_row.addWidget(self.ptt_record_btn)
+        cl.addLayout(ptt_row)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self.hotkey_defaults_btn = QPushButton("Reset to Defaults", tab)
+        self.hotkey_defaults_btn.clicked.connect(self._reset_hotkey_defaults)
+        btn_row.addWidget(self.hotkey_defaults_btn)
+        cl.addLayout(btn_row)
 
         info = QLabel(
             "Both shortcuts work at the same time — no mode to pick. "
+            "Click Record, then press the keys; Esc cancels. "
             "Releasing push-to-talk only stops a session it started, "
             "so it can never cut off a toggle dictation.", tab)
         info.setProperty("class", "hint")
@@ -487,6 +560,71 @@ class SettingsDialog(QDialog):
         layout.addWidget(card)
         layout.addStretch(1)
         self.tabs.addTab(tab, "Shortcuts")
+
+    # ------------------------------------------------- hotkey recording ----
+    def _start_key_capture(self, target: QLineEdit, button: QPushButton):
+        from hotkey_recorder import HotkeyCapture
+        self._stop_key_capture(silent=True)
+        self._capture_target = target
+        self._capture_button = button
+        self._capture = HotkeyCapture()
+        try:
+            self._capture.captured.connect(self._on_key_captured)
+            self._capture.cancelled.connect(self._on_key_capture_cancelled)
+        except Exception:
+            pass
+        button.setText("Press keys...")
+        button.setEnabled(False)  # re-enabled when capture ends
+        target.setPlaceholderText("Press keys now (Esc cancels)...")
+        self._capture.start()
+        # If the listener failed to start, restore immediately.
+        try:
+            if not self._capture.is_active:
+                self._on_key_capture_cancelled()
+        except Exception:
+            pass
+
+    def _on_key_captured(self, text: str):
+        try:
+            if self._capture_target is not None and text:
+                self._capture_target.setText(text)
+        finally:
+            self._end_key_capture()
+
+    def _on_key_capture_cancelled(self):
+        self._end_key_capture()
+
+    def _end_key_capture(self):
+        try:
+            if self._capture_button is not None:
+                self._capture_button.setText("Record")
+                self._capture_button.setEnabled(True)
+        except Exception:
+            pass
+        try:
+            if self.toggle_key_input is not None:
+                self.toggle_key_input.setPlaceholderText("ctrl+shift+space")
+            if self.ptt_key_input is not None:
+                self.ptt_key_input.setPlaceholderText("f8")
+        except Exception:
+            pass
+        self._capture_target = None
+        self._capture_button = None
+
+    def _stop_key_capture(self, silent: bool = True):
+        cap = getattr(self, "_capture", None)
+        if cap is not None:
+            try:
+                cap.stop(silent=silent)
+            except Exception:
+                pass
+            self._capture = None
+
+    def _reset_hotkey_defaults(self):
+        self._stop_key_capture(silent=True)
+        self._end_key_capture()
+        self.toggle_key_input.setText("ctrl+shift+space")
+        self.ptt_key_input.setText("f8")
 
     def _build_logs_tab(self):
         tab = QWidget()
@@ -629,10 +767,26 @@ class SettingsDialog(QDialog):
             self._test_audio_engine = None
 
     def _on_cancel(self):
+        self._stop_key_capture(silent=True)
         self._stop_mic_test()
         self.reject()
 
+    def _confirm_quit(self):
+        answer = QMessageBox.question(
+            self,
+            "Quit Self-Whisper?",
+            "Close Self-Whisper completely?\nDictation hotkeys will stop working until you start it again.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer == QMessageBox.StandardButton.Yes:
+            self._stop_key_capture(silent=True)
+            self._stop_mic_test()
+            self.quit_requested.emit()
+            self.reject()
+
     def closeEvent(self, event):
+        self._stop_key_capture(silent=True)
         self._stop_mic_test()
         super().closeEvent(event)
 
@@ -663,7 +817,21 @@ class SettingsDialog(QDialog):
             QMessageBox.critical(self, "Connection Failed", f"Could not connect with this key:\n{e}")
 
     def _load_values(self):
-        self.api_key_input.setText(config.get("api_key", ""))
+        # API key: vault first, legacy config file second (one-time migration).
+        try:
+            import secure_store
+            legacy = (config.get("api_key", "") or "").strip()
+            if legacy and not secure_store.get_api_key():
+                if secure_store.migrate_from_config(legacy):
+                    config.set("api_key", "", auto_save=True)
+            vault_key = secure_store.get_api_key()
+            if secure_store.available():
+                self.key_storage_hint.setText("Key is stored securely in Windows Credential Manager.")
+            else:
+                self.key_storage_hint.setText("Secure storage unavailable — key is kept in the local config file.")
+            self.api_key_input.setText(vault_key or config.get("api_key", ""))
+        except Exception:
+            self.api_key_input.setText(config.get("api_key", ""))
         self.model_combo.setCurrentText(config.get("model", "gemini-3.5-transcribe-live"))
 
         lang_idx = self.lang_combo.findData(config.get("language_mode", "bn_primary"))
@@ -686,6 +854,12 @@ class SettingsDialog(QDialog):
         self.toggle_key_input.setText(config.get("hotkey_toggle", "<ctrl>+<shift>+<space>"))
         self.ptt_key_input.setText(config.get("hotkey_push_to_talk", "<f8>"))
 
+        self.vad_check.setChecked(config.get("vad_enabled", False))
+        vad_ms = config.get("vad_silence_ms", 1800)
+        vad_idx = self.vad_silence_combo.findData(vad_ms)
+        if vad_idx != -1:
+            self.vad_silence_combo.setCurrentIndex(vad_idx)
+
         dev_idx = config.get("input_device_index")
         if dev_idx is None or dev_idx == -1:
             self.device_combo.setCurrentIndex(0)
@@ -696,6 +870,7 @@ class SettingsDialog(QDialog):
                     break
 
     def _save_values(self):
+        self._stop_key_capture(silent=True)
         self._stop_mic_test()
 
         chosen_device = self.device_combo.currentData()
@@ -704,8 +879,21 @@ class SettingsDialog(QDialog):
 
         inj_mode = "smart_paste" if self.smart_paste_radio.isChecked() else "typewriter"
 
+        # API key: prefer the Windows Credential Manager vault; only keep it
+        # in the plain config file when no vault backend is available.
+        typed_key = self.api_key_input.text().strip()
+        try:
+            import secure_store
+            if secure_store.available():
+                secure_store.set_api_key(typed_key)
+                stored_key = ""  # never persist plain text when vault works
+            else:
+                stored_key = typed_key
+        except Exception:
+            stored_key = typed_key
+
         updates = {
-            "api_key": self.api_key_input.text().strip(),
+            "api_key": stored_key,
             "model": self.model_combo.currentText().strip(),
             "language_mode": self.lang_combo.currentData(),
             "correction_level": self.correct_combo.currentData(),
@@ -715,6 +903,8 @@ class SettingsDialog(QDialog):
             "hotkey_toggle": self.toggle_key_input.text().strip(),
             "hotkey_push_to_talk": self.ptt_key_input.text().strip(),
             "input_device_index": chosen_device,
+            "vad_enabled": self.vad_check.isChecked(),
+            "vad_silence_ms": self.vad_silence_combo.currentData(),
         }
 
         config.update(updates, auto_save=True)

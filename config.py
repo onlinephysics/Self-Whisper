@@ -37,6 +37,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "sample_rate": 16000,
     "chunk_duration_ms": 100,    # 100ms chunks for real-time streaming
 
+    # Voice Activity Detection (auto-stop on silence)
+    "vad_enabled": False,        # When True, dictation ends automatically after silence
+    "vad_silence_ms": 1800,      # Silence duration that triggers auto-stop
+    "vad_threshold": 0.08,       # Normalized mic level (0-1) counted as speech
+
     # UI Preferences
     "hud_always_on_top": True,
     "hud_opacity": 0.96,

@@ -21,6 +21,8 @@ from PyQt6.QtWidgets import QApplication, QMessageBox
 
 from config import config
 from log_store import install as install_log_store, log, log_dictation
+from single_instance import SingleInstanceGuard
+from vad import SilenceDetector
 from audio_capture import AudioCaptureEngine
 from gemini_live import GeminiLiveSession, GeminiTranscribeFallback
 from text_injector import injector
@@ -43,9 +45,22 @@ class AppSignals(QObject):
     toggle_requested = pyqtSignal()
     push_start_requested = pyqtSignal()
     push_stop_requested = pyqtSignal()
+    auto_stop_requested = pyqtSignal()  # VAD silence detected (worker -> GUI)
 
 
 class SelfWhisperApp:
+    @staticmethod
+    def _get_api_key() -> str:
+        """Vault (Credential Manager) first, legacy config file second."""
+        try:
+            import secure_store
+            vault_key = secure_store.get_api_key()
+            if vault_key:
+                return vault_key
+        except Exception:
+            pass
+        return (config.get("api_key", "") or "").strip()
+
     def __init__(self, qapp: QApplication):
         self.qapp = qapp
         self.signals = AppSignals()
@@ -68,6 +83,10 @@ class SelfWhisperApp:
         # push-to-talk key. PTT release only stops a PTT-owned session, so
         # releasing PTT can never kill a toggle-started dictation.
         self._ptt_owner = False
+        # Voice Activity Detection state (auto-stop on silence).
+        self._vad = None
+        self._vad_active = False
+        self._last_audio_level = 0.0
 
         # Continuous background focus tracker: always remembers target application
         self.focus_poll_timer = QTimer()
@@ -82,6 +101,8 @@ class SelfWhisperApp:
 
         self.tray = SelfWhisperTray()
         self.tray.show()
+        # Point users at the tray Exit entry (also visible in the hidden-icons overflow).
+        self.tray.show_running_notice()
 
         self.settings_dialog: Optional[SettingsDialog] = None
 
@@ -148,6 +169,7 @@ class SelfWhisperApp:
         self.signals.toggle_requested.connect(self.toggle_recording)
         self.signals.push_start_requested.connect(self._on_push_start)
         self.signals.push_stop_requested.connect(self._on_push_stop)
+        self.signals.auto_stop_requested.connect(self._on_vad_stop)
 
         # HUD button events (connect once)
         try:
@@ -162,9 +184,15 @@ class SelfWhisperApp:
             self.hud.language_cycle_clicked.disconnect()
         except Exception:
             pass
+        try:
+            self.hud.language_picked.disconnect()
+        except Exception:
+            pass
+        # Explicit picker menu (no blind cycling: the mode only changes when
+        # the user ticks an entry, a tray item, or the Settings combo).
+        self.hud.language_picked.connect(self._set_language)
         self.hud.toggle_clicked.connect(self.toggle_recording)
         self.hud.settings_clicked.connect(self.open_settings)
-        self.hud.language_cycle_clicked.connect(self._cycle_language)
 
         # Tray actions (connect once)
         try:
@@ -200,6 +228,11 @@ class SelfWhisperApp:
             injector.stream_update(text, target_hwnd=self.target_hwnd)
 
     def _on_audio_level(self, level: float):
+        # Runs on the audio thread: only store + re-emit (both thread-safe).
+        try:
+            self._last_audio_level = float(level)
+        except Exception:
+            pass
         self.signals.audio_level_updated.emit(level)
 
     def _toggle_hud_visibility(self):
@@ -208,16 +241,22 @@ class SelfWhisperApp:
         else:
             self.hud.show()
 
-    def _cycle_language(self):
-        current = config.get("language_mode", "bn_primary")
-        cycle_order = ["bn_primary", "bn_only", "en_only", "auto"]
+    def _on_secondary_launch(self):
+        """Another launch attempt: come forward instead of duplicating."""
         try:
-            next_idx = (cycle_order.index(current) + 1) % len(cycle_order)
-            new_mode = cycle_order[next_idx]
-        except ValueError:
-            new_mode = "bn_primary"
-
-        self._set_language(new_mode)
+            self.hud.show()
+            self.hud.raise_()
+            self.hud.activateWindow()
+        except Exception:
+            pass
+        try:
+            self.tray.showMessage(
+                "Self-Whisper is already running",
+                "There can only be one copy — this window was brought forward.",
+            )
+        except Exception:
+            pass
+        log("Second launch blocked: primary instance brought forward.")
 
     def _set_language(self, lang_mode: str):
         config.set("language_mode", lang_mode, auto_save=True)
@@ -256,7 +295,7 @@ class SelfWhisperApp:
             self._ptt_owner = False
             return
         self._ptt_owner = True
-        self.start_recording()
+        self.start_recording(use_vad=False)  # holding the key IS the stop signal
 
     def _on_push_stop(self):
         """Hold-to-talk released: stop only the PTT-owned session."""
@@ -265,12 +304,19 @@ class SelfWhisperApp:
         if owned and self.is_recording:
             self.stop_recording()
 
-    def start_recording(self):
+    def _on_vad_stop(self):
+        """Auto-stop fired after silence (GUI thread, idempotent)."""
+        self._vad_active = False
+        if self.is_recording:
+            log("Auto-stop: silence detected, finalizing.")
+            self.stop_recording()
+
+    def start_recording(self, use_vad: bool = True):
         """Initiates microphone capture and real-time streaming."""
         if self.is_recording:
             return
 
-        api_key = config.get("api_key", "").strip()
+        api_key = self._get_api_key()
         if not api_key:
             if config.get("sound_effects_enabled", True):
                 play_error_sound()
@@ -290,6 +336,20 @@ class SelfWhisperApp:
         self.is_recording = True
         self.accumulated_pcm = bytearray()
         self._stop_stream_flag = False
+        self._last_audio_level = 0.0
+
+        # Arm voice-activity auto-stop if enabled in Settings (toggle mode only).
+        self._vad = None
+        self._vad_active = False
+        if use_vad and config.get("vad_enabled", False):
+            try:
+                self._vad = SilenceDetector(
+                    threshold=float(config.get("vad_threshold", 0.08)),
+                    silence_ms=int(config.get("vad_silence_ms", 1800)),
+                )
+                self._vad_active = True
+            except Exception as e:
+                print(f"[SelfWhisper] VAD init failed ({e}); continuing without auto-stop.")
 
         # Capture current active foreground window so text is injected into it
         try:
@@ -329,7 +389,7 @@ class SelfWhisperApp:
 
     def _ensure_live_session(self):
         """Maintains persistent WebSocket session with Gemini Live."""
-        api_key = config.get("api_key", "").strip()
+        api_key = self._get_api_key()
         model = config.get("model", "gemini-3.5-transcribe-live")
         fallback_model = config.get("fallback_model", "gemini-2.0-flash")
         corr_level = config.get("correction_level", "high")
@@ -362,6 +422,15 @@ class SelfWhisperApp:
                 self.accumulated_pcm.extend(chunk)
                 if self.active_session:
                     self.active_session.send_pcm_chunk(chunk)
+            # Voice-activity auto-stop (checked every loop, ~12x/sec).
+            if self._vad_active and self._vad is not None and self.is_recording:
+                try:
+                    if self._vad.update(self._last_audio_level):
+                        self._vad_active = False  # one-shot
+                        self.signals.auto_stop_requested.emit()
+                        return
+                except Exception:
+                    pass
 
     def stop_recording(self):
         """Stops recording, signals turnComplete over WebSocket and triggers single clean injection."""
@@ -370,6 +439,7 @@ class SelfWhisperApp:
 
         self.is_recording = False
         self._stop_stream_flag = True
+        self._vad_active = False
 
         self.signals.status_changed.emit("transcribing", "Finalizing...")
         self.tray.set_recording_state(False)
@@ -434,7 +504,7 @@ class SelfWhisperApp:
 
         # If WebSocket didn't return text after 4s, run REST fallback with gemini-2.0-flash
         print("[SelfWhisper] WebSocket timed out; using Gemini fallback engine...")
-        api_key = config.get("api_key", "").strip()
+        api_key = self._get_api_key()
         corr_level = config.get("correction_level", "high")
         lang_mode = config.get("language_mode", "bn_primary")
 
@@ -494,13 +564,56 @@ class SelfWhisperApp:
             QTimer.singleShot(450, self.hud.hide)
 
     def open_settings(self):
-        """Opens modal settings dialog."""
-        if self.settings_dialog is None or not self.settings_dialog.isVisible():
-            self.settings_dialog = SettingsDialog()
-            self.settings_dialog.settings_saved.connect(self._on_settings_saved)
-            self.settings_dialog.hud_reset_requested.connect(self.hud.position_bottom_right)
-            self.settings_dialog.show()
-            self.settings_dialog.activateWindow()
+        """Opens the settings dialog, restoring it if already open/minimized."""
+        if self.settings_dialog is not None and self.settings_dialog.isVisible():
+            self._raise_settings()
+            return
+        self.settings_dialog = SettingsDialog()
+        self.settings_dialog.settings_saved.connect(self._on_settings_saved)
+        self.settings_dialog.hud_reset_requested.connect(self.hud.position_bottom_right)
+        self.settings_dialog.quit_requested.connect(self.exit_app)
+        self.settings_dialog.show()
+        self._raise_settings()
+
+    def _raise_settings(self):
+        """Brings the settings window to the front, un-minimizing if needed.
+
+        Needed because Settings is often opened from a global hotkey while
+        another app owns the foreground — Windows then refuses activation and
+        the dialog ends up minimized/behind everything.
+        """
+        dlg = self.settings_dialog
+        if dlg is None:
+            return
+        try:
+            dlg.setWindowState(dlg.windowState() & ~Qt.WindowState.WindowMinimized)
+            dlg.show()
+            dlg.raise_()
+            dlg.activateWindow()
+        except Exception:
+            pass
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            hwnd = int(dlg.winId())
+            user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+            fg = user32.GetForegroundWindow()
+            if fg and fg != hwnd:
+                cur = kernel32.GetCurrentThreadId()
+                try:
+                    fg_thread = user32.GetWindowThreadProcessId(fg, None)
+                except Exception:
+                    fg_thread = 0
+                if fg_thread:
+                    user32.AttachThreadInput(cur, fg_thread, True)
+                    user32.SetForegroundWindow(hwnd)
+                    user32.AttachThreadInput(cur, fg_thread, False)
+                else:
+                    user32.SetForegroundWindow(hwnd)
+            dlg.activateWindow()
+        except Exception:
+            pass
 
     def _on_settings_saved(self):
         """Reloads settings into active components."""
@@ -562,8 +675,14 @@ def main():
     app.setQuitOnLastWindowClosed(False)  # Keep running in system tray
     app.setApplicationName("Self-Whisper")
 
+    # Single instance: a second launch just nudges the running app and quits.
+    instance_guard = SingleInstanceGuard()
+    if not instance_guard.try_acquire():
+        sys.exit(0)
+
     log("Self-Whisper starting...")
     whisper_app = SelfWhisperApp(app)
+    instance_guard.show_requested.connect(whisper_app._on_secondary_launch)
     log("Self-Whisper ready. Press Ctrl+Shift+Space or hold F8 to dictate.")
     sys.exit(app.exec())
 

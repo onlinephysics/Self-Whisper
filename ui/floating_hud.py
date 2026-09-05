@@ -180,7 +180,8 @@ class FloatingHUD(QWidget):
     # Signals
     toggle_clicked = pyqtSignal()
     settings_clicked = pyqtSignal()
-    language_cycle_clicked = pyqtSignal()
+    language_cycle_clicked = pyqtSignal()  # legacy: kept for compatibility
+    language_picked = pyqtSignal(str)      # explicit menu choice, e.g. "bn_primary"
 
     def __init__(self, initial_x=None, initial_y=None):
         super().__init__()
@@ -201,6 +202,7 @@ class FloatingHUD(QWidget):
         self._press_pos = QPoint()
         self._drag_threshold = 5  # px: below this it's a click, not a drag
         self.current_state = "idle"
+        self._lang_mode = "bn_primary"
 
         self._init_ui()
 
@@ -265,9 +267,9 @@ class FloatingHUD(QWidget):
         self.lang_btn.setObjectName("LangBtn")
         self.lang_btn.setFixedHeight(24)
         self.lang_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.lang_btn.setToolTip("Click to change language mode")
+        self.lang_btn.setToolTip("Click to choose dictation language")
         self.lang_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.lang_btn.clicked.connect(self.language_cycle_clicked.emit)
+        self.lang_btn.clicked.connect(self._show_language_menu)
         layout.addWidget(self.lang_btn)
 
         # 4. Settings Gear Button (drawn gear icon)
@@ -300,7 +302,7 @@ class FloatingHUD(QWidget):
                     border-radius: 21px;
                 }
                 QPushButton#RecordBtn {
-                    background-color: #dc2626;
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #f87171, stop:1 #dc2626);
                     border: none;
                     border-radius: 15px;
                     color: #ffffff;
@@ -340,7 +342,7 @@ class FloatingHUD(QWidget):
                     border-radius: 21px;
                 }
                 QPushButton#RecordBtn {
-                    background-color: #d97706;
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #fbbf24, stop:1 #d97706);
                     border: none;
                     border-radius: 15px;
                     color: #ffffff;
@@ -380,7 +382,7 @@ class FloatingHUD(QWidget):
                     border-radius: 21px;
                 }
                 QPushButton#RecordBtn {
-                    background-color: #0ea472;
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #34d399, stop:1 #0ea472);
                     border: none;
                     border-radius: 15px;
                     color: #ffffff;
@@ -420,14 +422,14 @@ class FloatingHUD(QWidget):
                     border-radius: 21px;
                 }
                 QPushButton#RecordBtn {
-                    background-color: rgba(91, 156, 246, 0.14);
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 rgba(91, 156, 246, 0.22), stop:1 rgba(37, 99, 235, 0.22));
                     border: 1px solid rgba(91, 156, 246, 0.35);
                     border-radius: 15px;
                     color: #5b9cf6;
                     font-size: 13px;
                 }
                 QPushButton#RecordBtn:hover {
-                    background-color: #2563eb;
+                    background-color: qlineargradient(x1:0, y1:0, x2:0, y2:1, stop:0 #3b82f6, stop:1 #2563eb);
                     border-color: #5b9cf6;
                     color: #ffffff;
                 }
@@ -503,7 +505,46 @@ class FloatingHUD(QWidget):
         pass
 
     def update_language_badge(self, lang_mode: str):
+        self._lang_mode = lang_mode
         self.lang_btn.setText(LANGUAGE_BADGES.get(lang_mode, LANGUAGE_BADGES["bn_primary"]))
+
+    def _show_language_menu(self):
+        """Explicit picker (with checkmark) instead of blind per-click cycling,
+        so the mode can never change by an accidental badge click."""
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QCursor
+        menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background-color: #252930;
+                color: #e8ecf4;
+                border: 1px solid #3a3f4c;
+                border-radius: 8px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 22px;
+                border-radius: 4px;
+                font-size: 12px;
+            }
+            QMenu::item:selected {
+                background-color: #2563eb;
+                color: #ffffff;
+            }
+        """)
+        options = [
+            ("bn_primary", "Bangla + English"),
+            ("bn_only", "Bangla only"),
+            ("en_only", "English only"),
+            ("auto", "Auto detect"),
+        ]
+        current = getattr(self, "_lang_mode", "bn_primary")
+        for mode, label in options:
+            act = menu.addAction(label)
+            act.setCheckable(True)
+            act.setChecked(mode == current)
+            act.triggered.connect(lambda _c=False, m=mode: self.language_picked.emit(m))
+        menu.exec(QCursor.pos())
 
     # Draggable HUD Window Implementation
     # NOTE: drag only starts on the pill background, never on buttons.

@@ -10,16 +10,21 @@ from PyQt6.QtWidgets import QSystemTrayIcon, QMenu
 
 
 def create_tray_pixmap(is_active: bool = False) -> QPixmap:
-    """Generates a high-DPI custom tray icon dynamically."""
+    """Generates a high-DPI custom tray icon dynamically (gradient disc + mic)."""
+    from PyQt6.QtGui import QLinearGradient
     pixmap = QPixmap(64, 64)
     pixmap.fill(QColor(0, 0, 0, 0))
 
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-    # Background circle
-    bg_color = QColor("#EF4444") if is_active else QColor("#0284C7")
-    painter.setBrush(QBrush(bg_color))
+    # Background gradient circle
+    top = QColor("#F87171") if is_active else QColor("#38BDF7")
+    bottom = QColor("#DC2626") if is_active else QColor("#0284C7")
+    grad = QLinearGradient(4, 4, 60, 60)
+    grad.setColorAt(0.0, top)
+    grad.setColorAt(1.0, bottom)
+    painter.setBrush(QBrush(grad))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(4, 4, 56, 56)
 
@@ -107,10 +112,23 @@ class SelfWhisperTray(QSystemTrayIcon):
         settings_action = menu.addAction("Settings...")
         settings_action.triggered.connect(self.settings_requested.emit)
 
-        exit_action = menu.addAction("Exit Self-Whisper")
+        exit_action = menu.addAction("Exit / Quit Self-Whisper")
         exit_action.triggered.connect(self.exit_requested.emit)
 
         self.setContextMenu(menu)
+
+    def show_running_notice(self):
+        """One-line hint so users can find the Exit entry (tray overflow included)."""
+        try:
+            if QSystemTrayIcon.supportsMessages():
+                self.showMessage(
+                    "Self-Whisper is running",
+                    "Right-click this icon and choose Exit to quit.",
+                    QSystemTrayIcon.MessageIcon.Information,
+                    6000,
+                )
+        except Exception:
+            pass
 
     def set_recording_state(self, is_recording: bool):
         if is_recording:
