@@ -24,7 +24,12 @@ from self_whisper.core.log_store import install as install_log_store, log, log_d
 from self_whisper.platform_win.single_instance import SingleInstanceGuard
 from self_whisper.audio.vad import SilenceDetector
 from self_whisper.audio.capture import AudioCaptureEngine
-from self_whisper.transcription.gemini_live import GeminiLiveSession, GeminiTranscribeFallback
+from self_whisper.transcription.gemini_live import (
+    GeminiLiveSession,
+    GeminiRewrite,
+    GeminiTranscribeFallback,
+    resolve_translate_target,
+)
 from self_whisper.input.injector import injector
 from self_whisper.input.hotkey_manager import GlobalHotkeyManager
 from self_whisper.ui.floating_hud import FloatingHUD
@@ -46,6 +51,7 @@ class AppSignals(QObject):
     push_start_requested = pyqtSignal()
     push_stop_requested = pyqtSignal()
     auto_stop_requested = pyqtSignal()  # VAD silence detected (worker -> GUI)
+    rewrite_ready = pyqtSignal(str, str)  # (rewritten_text, original_text)
 
 
 class SelfWhisperApp:
@@ -87,6 +93,8 @@ class SelfWhisperApp:
         self._vad = None
         self._vad_active = False
         self._last_audio_level = 0.0
+        # Which post-dictation pass is in flight ("rewriting"/"translating").
+        self._post_pass_kind = "rewriting"
 
         # Continuous background focus tracker: always remembers target application
         self.focus_poll_timer = QTimer()
@@ -170,6 +178,7 @@ class SelfWhisperApp:
         self.signals.push_start_requested.connect(self._on_push_start)
         self.signals.push_stop_requested.connect(self._on_push_stop)
         self.signals.auto_stop_requested.connect(self._on_vad_stop)
+        self.signals.rewrite_ready.connect(self._finish_rewrite_injection)
 
         # HUD button events (connect once)
         try:
@@ -262,6 +271,12 @@ class SelfWhisperApp:
         except Exception:
             pass
         log("Second launch blocked: primary instance brought forward.")
+
+    @staticmethod
+    def _post_translate_target(lang_mode: str = None) -> Optional[str]:
+        """Target when the Rewrite model translates post-dictation, else None."""
+        mode = lang_mode if lang_mode is not None else config.get("language_mode", "bn_primary")
+        return resolve_translate_target(config.get("translator_enabled", False), mode)
 
     def _set_language(self, lang_mode: str):
         config.set("language_mode", lang_mode, auto_save=True)
@@ -549,6 +564,68 @@ class SelfWhisperApp:
                 QTimer.singleShot(250, self.hud.hide)
             return
 
+        # Optional post-dictation pass over the WHOLE finalized phrase.
+        # Translator (Rewrite-model engine) takes precedence: it translates
+        # into the selected specific language, which already fixes language
+        # issues. Otherwise the plain rewrite pass runs when enabled.
+        # Runs off the GUI thread; the actual injection happens in
+        # _finish_rewrite_injection once the result arrives.
+        post_target = self._post_translate_target()
+        if post_target is not None:
+            self._post_pass_kind = "translating"
+            self.signals.status_changed.emit("transcribing", "Translating...")
+            threading.Thread(
+                target=self._run_post_pass, args=(clean_text, post_target), daemon=True
+            ).start()
+            return
+        if config.get("rewrite_enabled", False):
+            self._post_pass_kind = "rewriting"
+            self.signals.status_changed.emit("transcribing", "Rewriting...")
+            threading.Thread(
+                target=self._run_post_pass, args=(clean_text, None), daemon=True
+            ).start()
+            return
+
+        self._inject_final_text(clean_text)
+
+    def _run_post_pass(self, original: str, target: Optional[str]):
+        """Background worker: translate or rewrite the full phrase, then hand back to Qt."""
+        api_key = self._get_api_key()
+        lang_mode = config.get("language_mode", "bn_primary")
+        corr_level = config.get("correction_level", "high")
+        model = config.get("rewrite_model", "gemini-3.5-flash-lite") or "gemini-3.5-flash-lite"
+        try:
+            if target is not None:
+                result = GeminiRewrite.translate_text(
+                    text=original,
+                    api_key=api_key,
+                    model=model,
+                    target=target,
+                    correction_level=corr_level,
+                )
+            else:
+                result = GeminiRewrite.rewrite_text(
+                    text=original,
+                    api_key=api_key,
+                    model=model,
+                    language_mode=lang_mode,
+                    correction_level=corr_level,
+                )
+        except Exception as e:
+            print(f"[SelfWhisper] Post-pass error: {e}")
+            result = ""
+        self.signals.rewrite_ready.emit(result or "", original)
+
+    def _finish_rewrite_injection(self, rewritten: str, original: str):
+        """Qt-thread slot: inject the post-pass phrase (or original on failure)."""
+        final = rewritten.strip() if rewritten and rewritten.strip() else original
+        kind = getattr(self, "_post_pass_kind", "rewriting")
+        if rewritten and rewritten.strip() and rewritten.strip() != original:
+            print(f"[SelfWhisper] {kind.capitalize()} applied to finalized phrase.")
+        self._inject_final_text(final)
+
+    def _inject_final_text(self, clean_text: str):
+        """Logs, announces, and types the finalized phrase into the target app."""
         try:
             print(f"[SelfWhisper] Finalizing live dictation: {clean_text}")
         except UnicodeEncodeError:

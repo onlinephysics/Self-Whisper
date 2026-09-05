@@ -7,7 +7,7 @@ Tabbed layout (no scrolling): Connection / Language / Microphone / Shortcuts / L
 import json
 import urllib.request
 from PyQt6.QtCore import Qt, pyqtSignal, QUrl
-from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter, QColor, QBrush, QPen
+from PyQt6.QtGui import QDesktopServices, QIcon, QPixmap, QPainter, QColor, QBrush, QPen, QPalette
 from PyQt6.QtWidgets import (
     QDialog,
     QWidget,
@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
     QPlainTextEdit,
     QListWidget,
     QApplication,
+    QScrollArea,
 )
 
 from self_whisper.core.config import config
@@ -82,7 +83,7 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Self-Whisper Settings")
         self.resize(660, 560)
-        self.setMinimumSize(620, 500)
+        self.setMinimumSize(620, 460)
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         self._test_audio_engine = None
@@ -265,6 +266,33 @@ class SettingsDialog(QDialog):
                 font-size: 11px;
                 padding: 6px;
             }
+            QScrollArea {
+                background-color: #1c1f26;
+                border: none;
+            }
+            QScrollArea QScrollBar:vertical {
+                background: none;
+                width: 10px;
+                margin: 2px 0 2px 0;
+            }
+            QScrollArea QScrollBar::handle:vertical {
+                background-color: #3a3f4c;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollArea QScrollBar::handle:vertical:hover {
+                background-color: #5b9cf6;
+            }
+            QScrollArea QScrollBar::add-line:vertical,
+            QScrollArea QScrollBar::sub-line:vertical {
+                height: 0;
+                background: none;
+                border: none;
+            }
+            QScrollArea QScrollBar::add-page:vertical,
+            QScrollArea QScrollBar::sub-page:vertical {
+                background: none;
+            }
         """)
 
     def _create_card(self, title: str, parent: QWidget) -> tuple[QFrame, QVBoxLayout]:
@@ -315,7 +343,7 @@ class SettingsDialog(QDialog):
         header_layout.addWidget(self.site_btn)
         main_layout.addWidget(header_widget)
 
-        # Tabs (fixed height content -> no scrolling needed)
+        # Tabs (pages scroll internally; header + footer stay fixed)
         self.tabs = QTabWidget(self)
         tab_wrap = QWidget(self)
         tab_wrap_layout = QVBoxLayout(tab_wrap)
@@ -328,6 +356,7 @@ class SettingsDialog(QDialog):
         self._build_mic_tab()
         self._build_shortcuts_tab()
         self._build_logs_tab()
+        self._wrap_tabs_scrollable()
 
         # Footer
         footer_widget = QWidget(self)
@@ -356,6 +385,36 @@ class SettingsDialog(QDialog):
         self.save_btn.clicked.connect(self._save_values)
         footer_layout.addWidget(self.save_btn)
         main_layout.addWidget(footer_widget)
+
+    def _wrap_tabs_scrollable(self):
+        """Puts each tab page inside a scroll area.
+
+        Card content can exceed the dialog height (e.g. Language & Voice on
+        small screens). Only the page scrolls — the header and the footer
+        (Quit / Cancel / Save Settings) stay fixed and always reachable.
+        """
+        # Snapshot first: setWidget() reparents the page, which auto-removes
+        # its tab and shifts indices — so detach everything up front.
+        bg = QColor("#1c1f26")
+        pages = [(self.tabs.widget(i), self.tabs.tabText(i)) for i in range(self.tabs.count())]
+        while self.tabs.count():
+            self.tabs.removeTab(0)
+        for page, label in pages:
+            pal = page.palette()
+            pal.setColor(QPalette.ColorRole.Window, bg)
+            page.setPalette(pal)
+            page.setAutoFillBackground(True)
+            scroll = QScrollArea(self.tabs)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QFrame.Shape.NoFrame)
+            scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            spal = scroll.palette()
+            spal.setColor(QPalette.ColorRole.Window, bg)
+            scroll.setPalette(spal)
+            scroll.setWidget(page)
+            self.tabs.addTab(scroll, label)
+        self.tabs.setCurrentIndex(0)
 
     def _build_connection_tab(self):
         tab = QWidget()
@@ -421,8 +480,51 @@ class SettingsDialog(QDialog):
 
         self.sound_check = QCheckBox("Play chime on recording start/stop", tab)
         form.addRow("Sound:", self.sound_check)
+
+        self.rewrite_check = QCheckBox("Rewrite full phrase after dictation ends", tab)
+        self.rewrite_check.setToolTip(
+            "Runs a second AI pass over the whole finalized phrase to fix "
+            "language/dual-language (script) issues. Adds a short delay and "
+            "one extra API call per dictation."
+        )
+        form.addRow("Rewrite:", self.rewrite_check)
+
+        rewrite_row = QHBoxLayout()
+        rewrite_row.setSpacing(8)
+        self.rewrite_model_combo = QComboBox(tab)
+        self.rewrite_model_combo.setEditable(True)
+        self.rewrite_model_combo.addItems([
+            "gemini-3.5-flash-lite",
+            "gemini-2.0-flash",
+            "gemini-2.0-flash-lite",
+            "gemini-1.5-flash",
+        ])
+        self.rewrite_model_combo.setToolTip("REST model used for the rewrite pass.")
+        rewrite_row.addWidget(self.rewrite_model_combo, 1)
+        self.fetch_models_btn = QPushButton("Fetch Models", tab)
+        self.fetch_models_btn.setToolTip(
+            "List models from your API key and refresh both model dropdowns."
+        )
+        self.fetch_models_btn.clicked.connect(self._fetch_rewrite_models)
+        rewrite_row.addWidget(self.fetch_models_btn)
+        form.addRow("Rewrite model:", rewrite_row)
         cl.addLayout(form)
         layout.addWidget(card)
+
+        cardT, clT = self._create_card("Translator", tab)
+        tform = QFormLayout()
+        tform.setSpacing(10)
+
+        self.translator_check = QCheckBox("Translate into the selected language", tab)
+        self.translator_check.setToolTip(
+            "Input speech is treated as Bangla+English mixed and translated with "
+            "the Rewrite model into the language you picked (bar/tray). Only works "
+            "for specific single languages: Bangla Only or English Only. "
+            "Mixed modes skip translation."
+        )
+        tform.addRow("Translate:", self.translator_check)
+        clT.addLayout(tform)
+        layout.addWidget(cardT)
 
         card2, cl2 = self._create_card("Dictation Engine", tab)
         self.typewriter_radio = QRadioButton("Live typing (writes into the app as you speak)", tab)
@@ -803,18 +905,80 @@ class SettingsDialog(QDialog):
         if not key:
             QMessageBox.warning(self, "API Key Required", "Please enter a Google AI Studio API key first.")
             return
-        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
         try:
-            req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                models = data.get("models", [])
-                QMessageBox.information(
-                    self, "Connection Successful",
-                    f"Connected to Google AI Studio! {len(models)} accessible models.",
-                )
+            names = self._fetch_model_names(key)
+            if names:
+                self._refresh_model_combos(names)
+            QMessageBox.information(
+                self, "Connection Successful",
+                f"Connected to Google AI Studio! {len(names)} models listed.",
+            )
         except Exception as e:
             QMessageBox.critical(self, "Connection Failed", f"Could not connect with this key:\n{e}")
+
+    def _fetch_rewrite_models(self):
+        """Fetch Models button: refresh both model dropdowns from the API key."""
+        key = self.api_key_input.text().strip()
+        if not key:
+            try:
+                from self_whisper.platform_win import secure_store
+                key = secure_store.get_api_key() or (config.get("api_key", "") or "").strip()
+            except Exception:
+                key = (config.get("api_key", "") or "").strip()
+        if not key:
+            QMessageBox.warning(
+                self, "API Key Required",
+                "Enter your API key in Settings → Connection first, then Fetch Models.",
+            )
+            return
+        try:
+            names = self._fetch_model_names(key)
+        except Exception as e:
+            QMessageBox.critical(self, "Fetch Failed", f"Could not list models:\n{e}")
+            return
+        if not names:
+            QMessageBox.warning(self, "No Models", "The API returned no generateContent models.")
+            return
+        self._refresh_model_combos(names)
+        QMessageBox.information(
+            self, "Models Updated",
+            f"Refreshed {len(names)} models from Google AI Studio.",
+        )
+
+    @staticmethod
+    def _fetch_model_names(key: str, timeout: int = 5) -> list:
+        """GETs v1beta/models and returns generateContent-capable names."""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models?key={key}"
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return SettingsDialog._generate_content_models(data.get("models", []))
+
+    @staticmethod
+    def _generate_content_models(models: list) -> list:
+        """Model names (without the 'models/' prefix) supporting generateContent."""
+        names = []
+        for m in models or []:
+            methods = m.get("supportedGenerationMethods", []) or []
+            if "generateContent" not in methods:
+                continue
+            name = (m.get("name", "") or "").replace("models/", "").strip()
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def _refresh_model_combos(self, names: list):
+        """Replaces model combo items with API-fetched models, keeping typed text."""
+        for combo in (self.model_combo, self.rewrite_model_combo):
+            current = combo.currentText().strip()
+            combo.blockSignals(True)
+            try:
+                combo.clear()
+                combo.addItems(names)
+            finally:
+                combo.blockSignals(False)
+            if current:
+                combo.setCurrentText(current)
 
     def _load_values(self):
         # API key: vault first, legacy config file second (one-time migration).
@@ -839,6 +1003,9 @@ class SettingsDialog(QDialog):
             self.correct_combo.setCurrentIndex(cor_idx)
 
         self.sound_check.setChecked(config.get("sound_effects_enabled", True))
+        self.rewrite_check.setChecked(config.get("rewrite_enabled", False))
+        self.rewrite_model_combo.setCurrentText(config.get("rewrite_model", "gemini-3.5-flash-lite"))
+        self.translator_check.setChecked(config.get("translator_enabled", False))
         self.auto_hide_check.setChecked(config.get("auto_hide_hud", False))
 
         inj = config.get("injection_mode", "typewriter")
@@ -893,6 +1060,9 @@ class SettingsDialog(QDialog):
             "model": self.model_combo.currentText().strip(),
             # language_mode intentionally untouched: picked from bar/tray menu.
             "correction_level": self.correct_combo.currentData(),
+            "rewrite_enabled": self.rewrite_check.isChecked(),
+            "rewrite_model": self.rewrite_model_combo.currentText().strip() or "gemini-3.5-flash-lite",
+            "translator_enabled": self.translator_check.isChecked(),
             "sound_effects_enabled": self.sound_check.isChecked(),
             "auto_hide_hud": self.auto_hide_check.isChecked(),
             "injection_mode": inj_mode,

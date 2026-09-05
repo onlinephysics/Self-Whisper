@@ -94,6 +94,68 @@ def build_system_prompt(language_mode: str = "bn_primary", correction_level: str
     )
 
 
+# Targets the Translator supports. Single specific languages only: mixed
+# modes ("bn_primary", "auto") have no single output language to translate to.
+TRANSLATE_TARGETS = ("bn_only", "en_only")
+
+TRANSLATE_TARGET_NAMES = {
+    "bn_only": "Bangla (Bengali script)",
+    "en_only": "English (Latin script)",
+}
+
+
+def resolve_translate_target(translator_enabled: bool, language_mode: str) -> Optional[str]:
+    """Returns the translation target, or None when translation must be skipped.
+
+    Translation only works if the user selected a specific single language
+    (Bangla-only or English-only). Mixed modes return None.
+    """
+    if not translator_enabled:
+        return None
+    if language_mode in TRANSLATE_TARGETS:
+        return language_mode
+    return None
+
+
+def build_translate_prompt(target: str = "en_only", correction_level: str = "high") -> str:
+    """Prompt for the post-dictation translation pass (whole phrase in, translated out)."""
+    if target not in TRANSLATE_TARGET_NAMES:
+        target = "en_only"
+    lang_block = LANGUAGE_INSTRUCTIONS.get(target, LANGUAGE_INSTRUCTIONS["bn_only"])
+    corr_block = CORRECTION_INSTRUCTIONS.get(correction_level, CORRECTION_INSTRUCTIONS["high"])
+    return (
+        "You are a translation engine for Windows speech-to-text dictation.\n"
+        "You receive the FULL finalized dictation AFTER it has ended. The speaker "
+        "spoke Bangla, English, or a mix of both.\n"
+        f"Translate the whole text into {TRANSLATE_TARGET_NAMES[target]}:\n"
+        "1. Preserve the speaker's full meaning: no additions, no omissions.\n"
+        "2. Fix any language/script mistakes as part of translation.\n\n"
+        f"{lang_block}\n\n{corr_block}\n\n{STRICT_OUTPUT_SUFFIX}"
+    )
+
+
+def build_rewrite_prompt(language_mode: str = "bn_primary", correction_level: str = "high") -> str:
+    """Prompt for the post-dictation full-phrase rewrite pass.
+
+    Unlike the live transcription prompt (which guides streaming audio
+    transcription), this one takes the WHOLE finalized phrase as text and
+    rewrites it: fixing language/script mistakes across the full sentence
+    (Hindi/Devanagari leaks, wrong-script words, Banglish script mixing)
+    while preserving the speaker's true intent.
+    """
+    lang_block = LANGUAGE_INSTRUCTIONS.get(language_mode, LANGUAGE_INSTRUCTIONS["bn_primary"])
+    corr_block = CORRECTION_INSTRUCTIONS.get(correction_level, CORRECTION_INSTRUCTIONS["high"])
+    return (
+        "You are a post-dictation rewrite engine for Windows speech-to-text.\n"
+        "You receive the FULL finalized phrase AFTER dictation has ended.\n"
+        "Rewrite the whole phrase to fix language and dual-language (script) issues:\n"
+        "1. Move any Hindi/Devanagari words into the correct script per the language rules.\n"
+        "2. Fix script mixing word-by-word across the entire sentence (e.g. Bangla words in Latin -> Bengali script).\n"
+        "3. Keep the speaker's true meaning: do not add new content, do not drop content.\n\n"
+        f"{lang_block}\n\n{corr_block}\n\n{STRICT_OUTPUT_SUFFIX}"
+    )
+
+
 def contains_devanagari(text: str) -> bool:
     """True if text contains any Devanagari codepoint (U+0900–U+097F). Used for leak warnings."""
     for ch in text or "":
@@ -489,5 +551,129 @@ class GeminiTranscribeFallback:
             print(f"[GeminiFallback] HTTP Error: {e.code} - {err_msg}")
         except Exception as e:
             print(f"[GeminiFallback] Request Error: {e}")
+
+        return ""
+
+
+class GeminiRewrite:
+    """
+    Post-dictation full-phrase rewrite client (text-only REST call).
+
+    When enabled in Settings, the finalized transcript is sent back through
+    a REST model with the rewrite prompt so language/dual-language issues
+    are fixed across the WHOLE phrase (not just streaming deltas).
+    Returns "" on any failure so the caller can fall back to the original.
+    """
+
+    @staticmethod
+    def rewrite_text(
+        text: str,
+        api_key: str,
+        model: str = "gemini-3.5-flash-lite",
+        language_mode: str = "bn_primary",
+        correction_level: str = "high",
+        timeout: int = 12,
+    ) -> str:
+        clean = (text or "").strip()
+        if not clean or not (api_key or "").strip():
+            return clean
+
+        prompt = build_rewrite_prompt(language_mode, correction_level)
+        task = (
+            "Rewrite the following dictation result. "
+            "Return ONLY the rewritten text:\n" + clean
+        )
+        return GeminiRewrite._post_text(
+            prompt, task, clean, api_key, model, timeout,
+            tag="Rewrite", language_mode=language_mode,
+        )
+
+    @staticmethod
+    def translate_text(
+        text: str,
+        api_key: str,
+        model: str = "gemini-3.5-flash-lite",
+        target: str = "en_only",
+        correction_level: str = "high",
+        timeout: int = 12,
+    ) -> str:
+        """Translates the whole finalized phrase into a specific language.
+
+        target must be a single language ("bn_only"/"en_only"); anything else
+        falls back to "en_only". Returns "" on failure so callers can use the
+        original text.
+        """
+        clean = (text or "").strip()
+        if not clean or not (api_key or "").strip():
+            return clean
+        if target not in TRANSLATE_TARGETS:
+            target = "en_only"
+
+        prompt = build_translate_prompt(target, correction_level)
+        task = (
+            "Translate the following dictation result. "
+            "Return ONLY the translated text:\n" + clean
+        )
+        return GeminiRewrite._post_text(
+            prompt, task, clean, api_key, model, timeout,
+            tag="Translate", language_mode=target,
+        )
+
+    @staticmethod
+    def _post_text(
+        prompt: str,
+        task: str,
+        clean: str,
+        api_key: str,
+        model: str,
+        timeout: int,
+        tag: str,
+        language_mode: str,
+    ) -> str:
+        """Shared text-only REST call. Returns output text or "" on failure."""
+        clean_model = (model or "").replace("models/", "").strip() or "gemini-3.5-flash-lite"
+        if "transcribe-live" in clean_model:
+            clean_model = "gemini-3.5-flash-lite"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{clean_model}:generateContent?key={api_key}"
+
+        payload = {
+            "contents": [
+                {
+                    "parts": [{"text": prompt + "\n\n" + task}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.1,
+            },
+        }
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                res_json = json.loads(response.read().decode("utf-8"))
+                candidates = res_json.get("candidates", [])
+                if candidates:
+                    parts = candidates[0].get("content", {}).get("parts", [])
+                    if parts:
+                        out = (parts[0].get("text", "") or "").strip()
+                        if contains_devanagari(out):
+                            print(f"[GeminiRewrite] WARNING: {tag.lower()} output contains "
+                                  f"Devanagari (mode={language_mode}); prompt forbids Hindi.")
+                        return out
+        except urllib.error.HTTPError as e:
+            try:
+                err_msg = e.read().decode("utf-8")
+            except Exception:
+                err_msg = str(e)
+            print(f"[GeminiRewrite] HTTP Error: {e.code} - {err_msg}")
+        except Exception as e:
+            print(f"[GeminiRewrite] Request Error: {e}")
 
         return ""

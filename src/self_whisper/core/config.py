@@ -19,6 +19,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "language_mode": "bn_primary",
     # Options: "high" (Fix grammar, stutters, and punctuate), "normal" (Clean & punctuate), "verbatim"
     "correction_level": "high",
+    # Post-dictation full-phrase rewrite (second AI pass over the finalized
+    # text to fix language/script issues across the whole sentence).
+    "rewrite_enabled": False,
+    "rewrite_model": "gemini-3.5-flash-lite",
+
+    # Translator: input speech is always treated as Bangla+English mixed, and
+    # the finalized text is translated into the selected SPECIFIC language
+    # via the Rewrite model (text REST after dictation ends).
+    # Only single-language targets work ("bn_only" -> Bangla, "en_only" ->
+    # English); mixed modes ("bn_primary", "auto") skip translation.
+    "translator_enabled": False,
 
     # Hotkeys
     # Modes: "toggle" or "push_to_talk"
@@ -76,6 +87,10 @@ class ConfigManager:
                     # Sanitize any legacy hotkey string
                     if self.config.get("hotkey_toggle") == "<ctrl>+<shift>+space":
                         self.config["hotkey_toggle"] = "<ctrl>+<shift>+<space>"
+                    # Drop removed Translator Model switches (live engine retired;
+                    # translation is Rewrite-model only now).
+                    self.config.pop("translator_engine", None)
+                    self.config.pop("translator_use_live", None)
             except Exception as e:
                 print(f"[ConfigManager] Warning: Error loading config file: {e}")
         return self.config

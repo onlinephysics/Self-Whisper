@@ -262,6 +262,217 @@ class TestSelfWhisper(unittest.TestCase):
                 self.assertIn("Devanagari", p, f"missing Devanagari guard: {mode}/{corr}")
                 self.assertIn("NEVER output Hindi", p, f"missing Hindi guard: {mode}/{corr}")
 
+    def test_12_rewrite_prompt_guards(self):
+        """Rewrite prompt targets the whole phrase and keeps language guards."""
+        from self_whisper.transcription.gemini_live import build_rewrite_prompt
+        for mode in ("bn_primary", "bn_only", "en_only", "auto"):
+            for corr in ("high", "normal", "verbatim"):
+                p = build_rewrite_prompt(mode, corr)
+                self.assertIn("Devanagari", p, f"missing Devanagari guard: {mode}/{corr}")
+                self.assertIn("NEVER output Hindi", p, f"missing Hindi guard: {mode}/{corr}")
+                self.assertIn("FULL finalized phrase", p, f"rewrite must target the full phrase: {mode}/{corr}")
+
+    def test_13_rewrite_text_fallbacks(self):
+        """rewrite_text never networks without input/key; parses success; '' on error."""
+        import io
+        import json
+        from unittest import mock
+        from self_whisper.transcription.gemini_live import GeminiRewrite
+
+        # Empty input / missing key: no network, deterministic return.
+        with mock.patch("urllib.request.urlopen") as fake_open:
+            self.assertEqual(GeminiRewrite.rewrite_text("", "key"), "")
+            self.assertEqual(GeminiRewrite.rewrite_text("  ", "key"), "")
+            self.assertEqual(GeminiRewrite.rewrite_text("hello", ""), "hello")
+            fake_open.assert_not_called()
+
+        # Mocked REST success: rewritten text is parsed out.
+        body = json.dumps({
+            "candidates": [{"content": {"parts": [{"text": "আমি ঠিক আছি।"}]}}],
+        }).encode("utf-8")
+        fake_resp = mock.MagicMock()
+        fake_resp.read.return_value = body
+        fake_resp.__enter__.return_value = fake_resp
+        with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+            out = GeminiRewrite.rewrite_text("ami thik asi", "test-key")
+            self.assertEqual(out, "আমি ঠিক আছি।")
+
+        # HTTP failure: caller gets "" so it can fall back to the original.
+        import urllib.error
+        err = urllib.error.HTTPError(
+            url="http://x", code=400, msg="bad",
+            hdrs=None, fp=io.BytesIO(b'{"error": "bad"}'),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            self.assertEqual(GeminiRewrite.rewrite_text("hello", "test-key"), "")
+
+
+    def test_14_rewrite_model_defaults_and_fetch_filter(self):
+        """Rewrite defaults to gemini-3.5-flash-lite; fetch keeps generateContent models."""
+        from self_whisper.core.config import DEFAULT_CONFIG
+        self.assertEqual(DEFAULT_CONFIG["rewrite_model"], "gemini-3.5-flash-lite")
+
+        import inspect
+        from self_whisper.transcription.gemini_live import GeminiRewrite
+        sig = inspect.signature(GeminiRewrite.rewrite_text)
+        self.assertEqual(sig.parameters["model"].default, "gemini-3.5-flash-lite")
+
+        from self_whisper.ui.settings_dialog import SettingsDialog
+        names = SettingsDialog._generate_content_models([
+            {"name": "models/gemini-3.5-flash-lite",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3.5-transcribe-live",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/embedding-001", "supportedGenerationMethods": ["embedContent"]},
+            {"name": "models/gemini-3.5-flash-lite",
+             "supportedGenerationMethods": ["generateContent"]},
+            {"name": "", "supportedGenerationMethods": ["generateContent"]},
+        ])
+        self.assertEqual(names, ["gemini-3.5-flash-lite", "gemini-3.5-transcribe-live"])
+        self.assertEqual(SettingsDialog._generate_content_models([]), [])
+
+
+    def test_15_fetch_model_names(self):
+        """_fetch_model_names parses the models endpoint into filtered names."""
+        import json
+        from unittest import mock
+        from self_whisper.ui.settings_dialog import SettingsDialog
+
+        body = json.dumps({
+            "models": [
+                {"name": "models/gemini-3.5-flash-lite",
+                 "supportedGenerationMethods": ["generateContent"]},
+                {"name": "models/embedding-001",
+                 "supportedGenerationMethods": ["embedContent"]},
+            ],
+        }).encode("utf-8")
+        fake_resp = mock.MagicMock()
+        fake_resp.read.return_value = body
+        fake_resp.__enter__.return_value = fake_resp
+        with mock.patch("urllib.request.urlopen", return_value=fake_resp) as opener:
+            names = SettingsDialog._fetch_model_names("test-key")
+            self.assertEqual(names, ["gemini-3.5-flash-lite"])
+            called_url = opener.call_args[0][0].full_url
+            self.assertIn("v1beta/models?key=test-key", called_url)
+
+
+    def test_16_translator_targets_and_prompts(self):
+        """Translation resolves only for specific languages and keeps guards."""
+        from self_whisper.transcription import gemini_live as gl
+
+        self.assertEqual(gl.resolve_translate_target(True, "bn_only"), "bn_only")
+        self.assertEqual(gl.resolve_translate_target(True, "en_only"), "en_only")
+        self.assertIsNone(gl.resolve_translate_target(True, "bn_primary"))
+        self.assertIsNone(gl.resolve_translate_target(True, "auto"))
+        self.assertIsNone(gl.resolve_translate_target(True, "bogus"))
+        self.assertIsNone(gl.resolve_translate_target(False, "en_only"))
+
+        for target in ("bn_only", "en_only"):
+            p = gl.build_translate_prompt(target, "high")
+            self.assertIn("Devanagari", p)
+            self.assertIn("NEVER output Hindi", p)
+            self.assertIn("Translate the whole text", p)
+
+        # Unknown target falls back to English.
+        self.assertIn("English (Latin script)", gl.build_translate_prompt("xx", "high"))
+
+        # Live session stays transcription-only (no translation block).
+        sess = gl.GeminiLiveSession(api_key="k")
+        self.assertFalse(hasattr(sess, "translate_target"))
+        self.assertFalse(hasattr(sess, "set_translate_target"))
+        self.assertNotIn("TRANSLATION MODE", sess._get_system_prompt())
+
+    def test_17_translate_text(self):
+        """translate_text parses success, '' on error, no network without input/key."""
+        import json
+        from unittest import mock
+        from self_whisper.transcription.gemini_live import GeminiRewrite
+
+        with mock.patch("urllib.request.urlopen") as fake_open:
+            self.assertEqual(GeminiRewrite.translate_text("", "key"), "")
+            self.assertEqual(GeminiRewrite.translate_text("hello", ""), "hello")
+            fake_open.assert_not_called()
+
+        body = json.dumps({
+            "candidates": [{"content": {"parts": [{"text": "How are you?"}]}}],
+        }).encode("utf-8")
+        fake_resp = mock.MagicMock()
+        fake_resp.read.return_value = body
+        fake_resp.__enter__.return_value = fake_resp
+        with mock.patch("urllib.request.urlopen", return_value=fake_resp):
+            out = GeminiRewrite.translate_text("কেমন আছেন?", "k", target="en_only")
+            self.assertEqual(out, "How are you?")
+
+        import urllib.error
+        import io
+        err = urllib.error.HTTPError(
+            url="http://x", code=400, msg="bad",
+            hdrs=None, fp=io.BytesIO(b'{"error": "bad"}'),
+        )
+        with mock.patch("urllib.request.urlopen", side_effect=err):
+            self.assertEqual(GeminiRewrite.translate_text("hi", "k"), "")
+
+
+    def test_18_settings_dialog_scrollable(self):
+        """Settings tabs scroll internally; footer actions stay reachable."""
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication, QScrollArea
+            from self_whisper.ui.settings_dialog import SettingsDialog
+        except Exception as e:
+            self.skipTest(f"Qt unavailable: {e}")
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        try:
+            dlg = SettingsDialog()
+        except Exception as e:
+            self.skipTest(f"Cannot build dialog headless: {e}")
+            return
+        try:
+            self.assertEqual(dlg.tabs.count(), 5)
+            for i in range(dlg.tabs.count()):
+                page = dlg.tabs.widget(i)
+                self.assertIsInstance(
+                    page, QScrollArea,
+                    f"tab '{dlg.tabs.tabText(i)}' must scroll internally",
+                )
+                self.assertTrue(page.widgetResizable())
+                inner = page.widget()
+                self.assertIsNotNone(inner)
+                self.assertIsNotNone(inner.layout())
+            for btn in (dlg.quit_btn, dlg.cancel_btn, dlg.save_btn):
+                self.assertTrue(btn.isEnabled())
+            self.assertEqual(dlg.save_btn.objectName(), "PrimaryBtn")
+            self.assertLessEqual(dlg.minimumHeight(), 480)
+        finally:
+            dlg.close()
+
+
+    def test_19_translator_legacy_keys_dropped(self):
+        """Retired Translator Model switches are purged from loaded configs."""
+        import json
+        import tempfile
+        from self_whisper.core.config import ConfigManager, DEFAULT_CONFIG
+
+        self.assertNotIn("translator_use_live", DEFAULT_CONFIG)
+        self.assertNotIn("translator_engine", DEFAULT_CONFIG)
+        self.assertIn("translator_enabled", DEFAULT_CONFIG)
+
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "config.json")
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump({"translator_engine": "live", "translator_use_live": True}, f)
+            cfg = ConfigManager(custom_path=p)
+            self.assertNotIn("translator_engine", cfg.config)
+            self.assertNotIn("translator_use_live", cfg.config)
+            self.assertFalse(cfg.get("translator_enabled", False))
+            cfg.save()
+            with open(p, encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertNotIn("translator_engine", saved)
+            self.assertNotIn("translator_use_live", saved)
+
 
 if __name__ == "__main__":
     unittest.main()
