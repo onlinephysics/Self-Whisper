@@ -2,6 +2,8 @@ Todo:
 1. Adding way to activate it using voice (optional)
 2. Adding optional "AI Replies" feature. [e.g. user: "whispbot linux creator github", self-whisper: "www.github.com/torvalds". user: "whispbot write a master prompt for AI to build a cool 3D firebase authentication page" self-whisper: "You are an expert frontend developer....." (theres "whispbot" word as the AI replies feature startup] 
 3. Adding optional "Fast Correct" feature. [e.g. user: "github url", self-whisper: "https://www.github.com/". user: "youtube url", self-whisper: "https://youtube.com/"]
-4. Adding optional "Key Press" feature. [e.g. user: "github url key enter", self-whisper: "https://github.com/ (presses enter) (uses earlier Fast Correct feature here).
+4. Adding optional "Key Press" feature. [e.g. user: "github url key enter", self-whisper: "https://github.com/ (presses enter) (uses earlier Fast Correct feature used here) (used "key" word at first to define pressing the key)].
+5. Adding optional "memory" feature (will be noted later)
 
-Not finished
+
+I don't habe 100% surity about if the features arrive.
