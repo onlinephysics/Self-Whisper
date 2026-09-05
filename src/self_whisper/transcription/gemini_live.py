@@ -156,6 +156,32 @@ def build_rewrite_prompt(language_mode: str = "bn_primary", correction_level: st
     )
 
 
+# Documented transcription controls for gemini-*-transcribe-live (Live API):
+# - inputAudioTranscription.mode: "smart" (filler cleanup + formatting) or
+#   "verbatim" (exact words). Mapped from correction_level.
+# - inputAudioTranscription.languageCodes: BCP-47 hints that reduce wrong-
+#   language detection (e.g. Hindi leak on Bangla speech), especially on
+#   short clips. This is the documented language lock — system-instruction
+#   prose alone does not reliably constrain the transcribe model.
+TRANSCRIBE_MODES = {"high": "smart", "normal": "smart", "verbatim": "verbatim"}
+TRANSCRIBE_LANGUAGE_HINTS = {
+    "bn_primary": ["bn", "en"],
+    "bn_only": ["bn"],
+    "en_only": ["en"],
+    "auto": ["bn", "en"],
+}
+
+
+def transcribe_mode(correction_level: str = "high") -> str:
+    """Documented inputAudioTranscription.mode for a correction level."""
+    return TRANSCRIBE_MODES.get(correction_level, "smart")
+
+
+def transcribe_language_hints(language_mode: str = "bn_primary") -> list:
+    """Documented inputAudioTranscription.languageCodes for a language mode."""
+    return list(TRANSCRIBE_LANGUAGE_HINTS.get(language_mode, TRANSCRIBE_LANGUAGE_HINTS["bn_primary"]))
+
+
 def contains_devanagari(text: str) -> bool:
     """True if text contains any Devanagari codepoint (U+0900–U+097F). Used for leak warnings."""
     for ch in text or "":
@@ -223,6 +249,37 @@ class GeminiLiveSession:
     def _get_system_prompt(self) -> str:
         return build_system_prompt(self.language_mode, self.correction_level)
 
+    def _get_transcribe_mode(self) -> str:
+        return transcribe_mode(self.correction_level)
+
+    def _get_language_hints(self) -> list:
+        return transcribe_language_hints(self.language_mode)
+
+    def _build_setup_message(self) -> dict:
+        """Pure builder for the Bidi setup handshake (testable, no I/O)."""
+        return {
+            "setup": {
+                "model": self._get_model_name(self.model),
+                "generationConfig": {
+                    "responseModalities": ["TEXT"],
+                    "temperature": 0.1,
+                },
+                "systemInstruction": {
+                    "parts": [
+                        {
+                            "text": self._get_system_prompt()
+                        }
+                    ]
+                },
+                # Documented language lock + formatting control. Without
+                # languageCodes the server guesses per clip (Hindi leak).
+                "inputAudioTranscription": {
+                    "mode": self._get_transcribe_mode(),
+                    "languageCodes": self._get_language_hints(),
+                },
+            }
+        }
+
     def set_language_mode(self, language_mode: str):
         """Updates language live (takes effect on next turn; no reconnect needed)."""
         if language_mode in LANGUAGE_INSTRUCTIONS:
@@ -270,27 +327,14 @@ class GeminiLiveSession:
                     self.on_status_change("ready")
 
                 # Step 1: Send setup handshake
-                setup_msg = {
-                    "setup": {
-                        "model": self._get_model_name(target_model),
-                        "generationConfig": {
-                            "responseModalities": ["TEXT"],
-                            "temperature": 0.1,
-                        },
-                        "systemInstruction": {
-                            "parts": [
-                                {
-                                    "text": self._get_system_prompt()
-                                }
-                            ]
-                        },
-                    }
-                }
-                await ws.send(json.dumps(setup_msg))
+                await ws.send(json.dumps(self._build_setup_message()))
 
-                # Step 2: Concurrently receive messages and send audio/control messages
-                receive_task = asyncio.create_task(self._receive_loop(ws))
-                send_task = asyncio.create_task(self._send_loop(ws))
+                # Step 2: Concurrently receive messages and send audio/control messages.
+                # Docs: clients must wait for setupComplete before streaming audio;
+                # sending earlier can cancel the session / drop short clips.
+                setup_done = asyncio.Event()
+                receive_task = asyncio.create_task(self._receive_loop(ws, setup_done))
+                send_task = asyncio.create_task(self._send_loop(ws, setup_done))
 
                 done, pending = await asyncio.wait(
                     [receive_task, send_task],
@@ -307,7 +351,7 @@ class GeminiLiveSession:
             self._is_connected = False
             self.ws = None
 
-    async def _receive_loop(self, ws):
+    async def _receive_loop(self, ws, setup_done=None):
         """Processes real-time server messages and handles all Gemini Live formats."""
         try:
             async for message in ws:
@@ -316,6 +360,8 @@ class GeminiLiveSession:
                 # 1. Setup response
                 if "setupComplete" in data:
                     print("[GeminiLive] Setup completed by server.")
+                    if setup_done is not None:
+                        setup_done.set()
                     continue
 
                 server_content = data.get("serverContent", {})
@@ -371,8 +417,15 @@ class GeminiLiveSession:
         except Exception as e:
             print(f"[GeminiLive] Receive loop error: {e}")
 
-    async def _send_loop(self, ws):
+    async def _send_loop(self, ws, setup_done=None):
         """Pulls audio chunks or control messages from queue and sends to WebSocket."""
+        # Wait for setupComplete before streaming (docs: earlier audio can be
+        # dropped). Timeout fallback so a missing message never wedges us.
+        if setup_done is not None:
+            try:
+                await asyncio.wait_for(setup_done.wait(), timeout=5.0)
+            except (asyncio.TimeoutError, TimeoutError):
+                print("[GeminiLive] setupComplete not seen; sending anyway.")
         # Flush anything buffered while connecting, in original order.
         try:
             with self._pending_lock:

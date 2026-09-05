@@ -474,6 +474,107 @@ class TestSelfWhisper(unittest.TestCase):
             self.assertNotIn("translator_use_live", saved)
 
 
+    def test_21_transcribe_setup_message(self):
+        """Setup handshake carries documented mode + language hints per settings."""
+        from self_whisper.transcription.gemini_live import GeminiLiveSession
+
+        def setup(lang, corr):
+            s = GeminiLiveSession(api_key="k", language_mode=lang, correction_level=corr)
+            return s._build_setup_message()["setup"]
+
+        # Language lock: single-language hints, both hints for mixed modes.
+        self.assertEqual(setup("bn_only", "high")["inputAudioTranscription"]["languageCodes"], ["bn"])
+        self.assertEqual(setup("en_only", "high")["inputAudioTranscription"]["languageCodes"], ["en"])
+        self.assertEqual(setup("bn_primary", "high")["inputAudioTranscription"]["languageCodes"], ["bn", "en"])
+        self.assertEqual(setup("auto", "high")["inputAudioTranscription"]["languageCodes"], ["bn", "en"])
+        # Unknown mode falls back to mixed hints, never empty.
+        self.assertEqual(setup("xx", "high")["inputAudioTranscription"]["languageCodes"], ["bn", "en"])
+
+        # Formatting control: smart for high/normal, verbatim stays verbatim.
+        self.assertEqual(setup("bn_primary", "high")["inputAudioTranscription"]["mode"], "smart")
+        self.assertEqual(setup("bn_primary", "normal")["inputAudioTranscription"]["mode"], "smart")
+        self.assertEqual(setup("bn_primary", "verbatim")["inputAudioTranscription"]["mode"], "verbatim")
+
+        # Rest of the handshake is intact.
+        msg = setup("en_only", "verbatim")
+        self.assertEqual(msg["model"], "models/gemini-3.5-transcribe-live")
+        self.assertEqual(msg["generationConfig"]["responseModalities"], ["TEXT"])
+        prompt = msg["systemInstruction"]["parts"][0]["text"]
+        self.assertIn("Latin script ONLY", prompt)
+
+        # Builder is pure: no I/O, session untouched.
+        s = GeminiLiveSession(api_key="k")
+        before = (s._is_running, s._is_connected, s.ws)
+        s._build_setup_message()
+        self.assertEqual((s._is_running, s._is_connected, s.ws), before)
+
+
+    def test_22_translator_rewrite_switch(self):
+        """Translator checkbox offers Rewrite-model translation; logic honors it."""
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from self_whisper.ui.settings_dialog import SettingsDialog
+        except Exception as e:
+            self.skipTest(f"Qt unavailable: {e}")
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        try:
+            dlg = SettingsDialog()
+        except Exception as e:
+            self.skipTest(f"Cannot build dialog headless: {e}")
+            return
+        try:
+            self.assertEqual(
+                dlg.translator_check.text(), "Use Rewrite model also for translation")
+        finally:
+            dlg.close()
+
+        from unittest import mock
+        from self_whisper.app import SelfWhisperApp
+        from self_whisper.core.config import config
+        # Off (or mixed language): no post-pass -> explicit transcription as-is.
+        with mock.patch.dict(config.config, {"translator_enabled": False, "language_mode": "bn_only"}):
+            self.assertIsNone(SelfWhisperApp._post_translate_target())
+        with mock.patch.dict(config.config, {"translator_enabled": True, "language_mode": "bn_primary"}):
+            self.assertIsNone(SelfWhisperApp._post_translate_target())
+        # On + specific language: Rewrite model translates the meaning.
+        with mock.patch.dict(config.config, {"translator_enabled": True, "language_mode": "bn_only"}):
+            self.assertEqual(SelfWhisperApp._post_translate_target(), "bn_only")
+        with mock.patch.dict(config.config, {"translator_enabled": True, "language_mode": "en_only"}):
+            self.assertEqual(SelfWhisperApp._post_translate_target(), "en_only")
+
+
+    def test_23_api_limits_note(self):
+        """Connection tab shows the model limits note."""
+        import os
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        try:
+            from PyQt6.QtWidgets import QApplication
+            from self_whisper.ui.settings_dialog import SettingsDialog
+        except Exception as e:
+            self.skipTest(f"Qt unavailable: {e}")
+        app = QApplication.instance() or QApplication([])
+        self.assertIsNotNone(app)
+        try:
+            dlg = SettingsDialog()
+        except Exception as e:
+            self.skipTest(f"Cannot build dialog headless: {e}")
+            return
+        try:
+            note = dlg.findChild(type(dlg.limits_note), "limits_note")
+            self.assertIsNotNone(note)
+            text = note.text()
+            self.assertIn("Live Transcribe", text)
+            self.assertIn("20K", text)
+            self.assertIn("Flash Lite", text)
+            self.assertIn("500", text)
+            self.assertIn("250K", text)
+        finally:
+            dlg.close()
+
+
 if __name__ == "__main__":
     unittest.main()
 

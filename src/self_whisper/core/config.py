@@ -24,11 +24,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "rewrite_enabled": False,
     "rewrite_model": "gemini-3.5-flash-lite",
 
-    # Translator: input speech is always treated as Bangla+English mixed, and
-    # the finalized text is translated into the selected SPECIFIC language
-    # via the Rewrite model (text REST after dictation ends).
-    # Only single-language targets work ("bn_only" -> Bangla, "en_only" ->
-    # English); mixed modes ("bn_primary", "auto") skip translation.
+    # Translator ("Use Rewrite model also for translation"): input speech is
+    # always treated as Bangla+English mixed. Off = explicit transcription in
+    # the selected language/script (transliteration, no meaning change).
+    # On = the Rewrite model also translates the whole phrase's meaning
+    # (text REST after dictation ends). Only single-language targets work
+    # ("bn_only" -> Bangla, "en_only" -> English); mixed modes ("bn_primary",
+    # "auto") skip translation.
     "translator_enabled": False,
 
     # Hotkeys

@@ -9,6 +9,8 @@ where uv >nul 2>&1
 if not errorlevel 1 (
     uv run --no-sync python -m self_whisper
 ) else (
+    rem No uv: run from source layout with system Python (console stays open here).
+    set PYTHONPATH=src
     python -m self_whisper
 )
 if errorlevel 1 (

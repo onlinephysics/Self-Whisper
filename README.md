@@ -49,7 +49,7 @@ Only one copy runs at a time: launching it again just brings the running app for
    - The key is kept in **Windows Credential Manager** (never in plain text). Falls back to the local config file only if no vault backend exists.
 
 9. **Translator (optional)**:
-   - Settings → Language & Voice → **Translate** turns mixed Bangla+English speech into the language you picked on the bar/tray, using the Rewrite model after dictation ends. Works only for specific single languages (**Bangla Only** or **English Only**); mixed modes skip translation.
+   - Settings → Language & Voice → **Use Rewrite model also for translation**: off transcribes explicitly in the language you picked on the bar/tray (e.g. English words in Bengali script when Bangla is picked — no meaning change); on translates the whole phrase's meaning with the Rewrite model after dictation ends. Works only for specific single languages (**Bangla Only** or **English Only**); mixed modes skip translation.
 
 ---
 
@@ -104,13 +104,18 @@ General settings live in `~/.self_whisper/config.json`. The API key lives in Win
 | `correction_level` | `high` | `high`, `normal`, `verbatim` |
 | `rewrite_enabled` | `false` | Rewrite the whole finalized phrase to fix language/script issues |
 | `rewrite_model` | `gemini-3.5-flash-lite` | REST model used for the rewrite pass (refreshed via Test Connection) |
-| `translator_enabled` | `false` | Translate mixed Bangla+English speech into the selected language (via the Rewrite model) |
+| `translator_enabled` | `false` | Use Rewrite model also for translation (off = explicit transcription in the selected script, no meaning change) |
 | `hotkey_toggle` | `<ctrl>+<shift>+<space>` | Press to start/stop |
 | `hotkey_push_to_talk` | `<f8>` | Hold to talk |
 | `injection_mode` | `typewriter` | `typewriter` or `smart_paste` |
 | `input_device_index` | `None` | Microphone index (`None` = Windows default) |
 | `vad_enabled` | `false` | Auto-stop on silence |
 | `vad_silence_ms` | `1800` | Silence duration for auto-stop |
+
+### API Limits (also shown in Settings → Connection)
+
+- **Gemini 3.5 Live Transcribe**: unlimited requests/day and per minute, just 20K tokens/min — enough for a single user.
+- **Gemini 3.5 Flash Lite** (rewrite/translate): 500 requests/day, 15/min, 250K tokens/min — pretty solid for a single user.
 
 ---
 

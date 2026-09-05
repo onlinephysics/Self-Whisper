@@ -461,6 +461,21 @@ class SettingsDialog(QDialog):
         hint.setProperty("class", "hint")
         hint.setWordWrap(True)
         layout.addWidget(hint)
+
+        limits_card, limits_cl = self._create_card("API Limits", tab)
+        self.limits_note = QLabel(
+            "Live Transcribe: unlimited requests/day and per minute, 20K tokens/min — "
+            "enough for a single user.\n"
+            "Flash Lite (rewrite/translate): 500 requests/day, 15/min, 250K tokens/min — "
+            "pretty solid for a single user.",
+            tab,
+        )
+        self.limits_note.setObjectName("limits_note")
+        self.limits_note.setProperty("class", "hint")
+        self.limits_note.setWordWrap(True)
+        limits_cl.addWidget(self.limits_note)
+        layout.addWidget(limits_card)
+
         layout.addStretch(1)
         self.tabs.addTab(tab, "Connection")
 
@@ -515,12 +530,14 @@ class SettingsDialog(QDialog):
         tform = QFormLayout()
         tform.setSpacing(10)
 
-        self.translator_check = QCheckBox("Translate into the selected language", tab)
+        self.translator_check = QCheckBox("Use Rewrite model also for translation", tab)
         self.translator_check.setToolTip(
-            "Input speech is treated as Bangla+English mixed and translated with "
-            "the Rewrite model into the language you picked (bar/tray). Only works "
-            "for specific single languages: Bangla Only or English Only. "
-            "Mixed modes skip translation."
+            "Off: dictation is transcribed explicitly in the selected language "
+            "(e.g. English words written in Bengali script when Bangla is picked) "
+            "— no meaning change.\n"
+            "On: the Rewrite model also translates the whole phrase's meaning into "
+            "the selected language. Only works for specific single languages: "
+            "Bangla Only or English Only. Mixed modes skip translation."
         )
         tform.addRow("Translate:", self.translator_check)
         clT.addLayout(tform)

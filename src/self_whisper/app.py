@@ -281,11 +281,17 @@ class SelfWhisperApp:
     def _set_language(self, lang_mode: str):
         config.set("language_mode", lang_mode, auto_save=True)
         self.hud.update_language_badge(lang_mode)
-        # Push live into the active session so the change takes effect
-        # immediately without requiring a restart.
+        # Session config (prompt + language hints) is fixed at setup and the
+        # docs forbid changing it mid-connection — so reconnect immediately.
+        # Otherwise the switch would silently keep transcribing with the stale
+        # language until the next app restart. Safe mid-recording: the stream
+        # worker keeps running into the fresh session; buffered PCM is kept
+        # for the fallback path.
         try:
             if self.active_session is not None:
-                self.active_session.set_language_mode(lang_mode)
+                self.active_session.stop()
+                self.active_session = None
+                self._ensure_live_session()
         except Exception:
             pass
         mode_names = {

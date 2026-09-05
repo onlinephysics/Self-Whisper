@@ -1,0 +1,12 @@
+Next-Todo:
+1. Fix the issue mentioned by senior professional adviser: Deepta (aka OpenSource Contributor)
+2. Add option in the app for rewriting the whole phrase after ending for fixing language or dual language issues
+3. Make the bangla + english switcher a translator instead of input language 
+    1. Set the input language: Bangla+English
+    2. Gemini 3.5 Live Translate for translating
+    3. Translate to languages: Bangla & English as main and others like spanish
+4. Give a note about the Limits of Gemini 3.5 Live Transcribe and Gemini 3.5 Live Translate (Both Unlimited RPD, Unlimited RPM and TPM is 20K each (which is good for that use case and say that Google may collect users data) 
+
+
+Note: gemini 3.5 live translate failed. does not works :/ so 4 is skipped, instead doing 5
+5. Give a note about the Limits of Gemini 3.5 Live Transcribe and Gemini 3.5 Flash Lite. Live Transcribe: Unlimited RPD and RPM, just TPM is 20K which is enough for a single user. Flash Lite: 500 RPD, 15 RPM, 250K TPM, which is pretty solid for a single user. 
